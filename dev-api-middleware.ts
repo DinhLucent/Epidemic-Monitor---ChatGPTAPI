@@ -44,6 +44,8 @@ try {
 
 // In-memory cache for dev mode
 const cache = new Map<string, { data: unknown; expiry: number }>();
+const SEEN_ARTICLE_TTL_MS = 24 * 60 * 60_000;
+const SEEN_ARTICLE_MAX = 500;
 
 function getCached<T>(key: string): T | undefined {
   const entry = cache.get(key);
@@ -52,6 +54,65 @@ function getCached<T>(key: string): T | undefined {
 }
 function setCached(key: string, data: unknown, ttlMs: number): void {
   cache.set(key, { data, expiry: Date.now() + ttlMs });
+}
+
+type RssItem = { title: string; description: string; link: string; pubDate: string; sourceName: string };
+type ClassifiedArticle = { item: RssItem; disease: string; alert: string };
+
+interface SeenArticleEntry {
+  fingerprint: string;
+  classification: { disease: string; alert: string } | null;
+  outbreak: OutbreakItem | null;
+  expiresAt: number;
+  lastSeenAt: number;
+}
+
+const seenArticleCache = new Map<string, SeenArticleEntry>();
+
+function articleCacheKey(item: Pick<RssItem, 'link' | 'title' | 'sourceName'>): string {
+  return item.link
+    ? canonicalUrl(item.link)
+    : `${item.sourceName}:${item.title}`.trim().toLowerCase();
+}
+
+function articleFingerprint(item: Pick<RssItem, 'title' | 'description'>): string {
+  return hashStr(`${item.title}\n${item.description}`.replace(/\s+/g, ' ').trim().toLowerCase());
+}
+
+function getSeenArticleEntry(item: RssItem): SeenArticleEntry | undefined {
+  const key = articleCacheKey(item);
+  const entry = seenArticleCache.get(key);
+  const now = Date.now();
+  if (!entry || entry.expiresAt <= now || entry.fingerprint !== articleFingerprint(item)) {
+    if (entry) seenArticleCache.delete(key);
+    return undefined;
+  }
+  entry.lastSeenAt = now;
+  return entry;
+}
+
+function rememberSeenArticle(
+  item: RssItem,
+  patch: Pick<SeenArticleEntry, 'classification'> | Pick<SeenArticleEntry, 'outbreak'>,
+): void {
+  const key = articleCacheKey(item);
+  const now = Date.now();
+  const current = seenArticleCache.get(key);
+  seenArticleCache.set(key, {
+    fingerprint: articleFingerprint(item),
+    classification: current?.classification ?? null,
+    outbreak: current?.outbreak ?? null,
+    expiresAt: now + SEEN_ARTICLE_TTL_MS,
+    lastSeenAt: now,
+    ...patch,
+  });
+
+  if (seenArticleCache.size > SEEN_ARTICLE_MAX) {
+    const stale = Array.from(seenArticleCache.entries())
+      .sort((a, b) => a[1].lastSeenAt - b[1].lastSeenAt)
+      .slice(0, seenArticleCache.size - SEEN_ARTICLE_MAX);
+    for (const [staleKey] of stale) seenArticleCache.delete(staleKey);
+  }
 }
 
 function splitKeys(value: unknown): string[] {
@@ -451,8 +512,8 @@ async function fetchPipelineHotspots(): Promise<unknown[]> {
 
 /** Stage 1: Use ChatGPT to classify all RSS articles in batch */
 async function batchClassifyArticles(
-  items: Array<{ title: string; description: string; link: string; pubDate: string; sourceName: string }>,
-): Promise<Array<{ item: typeof items[0]; disease: string; alert: string }>> {
+  items: RssItem[],
+): Promise<ClassifiedArticle[]> {
   const extractor = getSdkOutbreakExtractor();
   if (!extractor) {
     console.warn('[classify] SDK unavailable, using conservative VN-only keyword fallback');
@@ -478,7 +539,7 @@ async function batchClassifyArticles(
   const classified = await extractor.classifyBatch(batchInput);
   console.info(`[classify] ChatGPT returned ${classified.length} classifications`);
 
-  const outbreaks: Array<{ item: typeof items[0]; disease: string; alert: string }> = [];
+  const outbreaks: ClassifiedArticle[] = [];
   for (const c of classified) {
     if (c.classification !== 'OUTBREAK') continue;
     if (c.index < 0 || c.index >= items.length) continue;
@@ -492,9 +553,44 @@ async function batchClassifyArticles(
   return outbreaks;
 }
 
+async function classifyArticlesWithSeenCache(items: RssItem[]): Promise<ClassifiedArticle[]> {
+  const cached: ClassifiedArticle[] = [];
+  const uncached: RssItem[] = [];
+  let cacheHits = 0;
+
+  for (const item of items) {
+    const entry = getSeenArticleEntry(item);
+    if (!entry) {
+      uncached.push(item);
+      continue;
+    }
+    cacheHits++;
+    if (entry.classification) {
+      cached.push({ item, ...entry.classification });
+    }
+  }
+
+  const classified = await batchClassifyArticles(uncached);
+  const positiveKeys = new Set<string>();
+  for (const result of classified) {
+    positiveKeys.add(articleCacheKey(result.item));
+    rememberSeenArticle(result.item, {
+      classification: { disease: result.disease, alert: result.alert },
+    });
+  }
+  for (const item of uncached) {
+    if (!positiveKeys.has(articleCacheKey(item))) {
+      rememberSeenArticle(item, { classification: null });
+    }
+  }
+
+  console.info(`[classify] seen-cache hit ${cacheHits}/${items.length} (${cached.length} outbreak); sent ${uncached.length} new/changed article(s)`);
+  return [...cached, ...classified];
+}
+
 /** Stage 2: Use ChatGPT to extract detailed data from filtered articles */
 async function batchExtractArticleDetails(
-  classifiedItems: Array<{ item: { title: string; description: string; link: string; pubDate: string; sourceName: string }; disease: string; alert: string }>,
+  classifiedItems: ClassifiedArticle[],
 ): Promise<OutbreakItem[]> {
   const extractor = getSdkOutbreakExtractor();
   const results: OutbreakItem[] = [];
@@ -606,7 +702,7 @@ async function handleOutbreaks(): Promise<unknown> {
     return parseRssItems(xml).map(item => ({ ...item, sourceName: s.name }));
   }));
 
-  const allRssItems: Array<{ title: string; description: string; link: string; pubDate: string; sourceName: string }> = [];
+  const allRssItems: RssItem[] = [];
   const okSources: string[] = [];
   for (let i = 0; i < rssResults.length; i++) {
     if (rssResults[i].status === 'fulfilled') {
@@ -615,8 +711,12 @@ async function handleOutbreaks(): Promise<unknown> {
     }
   }
 
-  const classified = await batchClassifyArticles(allRssItems);
-  const outbreakItems = await batchExtractArticleDetails(classified);
+  const uniqueRssItems = Array.from(
+    new Map(allRssItems.map((item) => [articleCacheKey(item), item])).values(),
+  );
+
+  const classified = await classifyArticlesWithSeenCache(uniqueRssItems);
+  const outbreakItems = await extractArticleDetailsWithSeenCache(classified);
 
   const whoDonResult = await Promise.allSettled([fetchPipelineHotspots()]);
   const all: unknown[] = [...outbreakItems];
@@ -796,6 +896,31 @@ async function mapLimit<T, R>(
   });
   await Promise.all(workers);
   return results;
+}
+
+async function extractArticleDetailsWithSeenCache(classifiedItems: ClassifiedArticle[]): Promise<OutbreakItem[]> {
+  const cached: OutbreakItem[] = [];
+  const uncached: ClassifiedArticle[] = [];
+
+  for (const classified of classifiedItems) {
+    const entry = getSeenArticleEntry(classified.item);
+    if (entry?.outbreak) {
+      cached.push(entry.outbreak);
+    } else {
+      uncached.push(classified);
+    }
+  }
+
+  const extracted = await batchExtractArticleDetails(uncached);
+  for (let index = 0; index < uncached.length; index++) {
+    const classified = uncached[index];
+    rememberSeenArticle(classified.item, {
+      outbreak: extracted[index] ?? null,
+    });
+  }
+
+  console.info(`[extract] seen-cache hit ${cached.length}/${classifiedItems.length}; extracted ${uncached.length} new/changed article(s)`);
+  return [...cached, ...extracted];
 }
 
 async function handleClimate(): Promise<unknown> {
