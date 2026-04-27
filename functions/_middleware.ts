@@ -2,10 +2,9 @@
  * Cloudflare Pages global middleware.
  * - Same-origin restriction: only our own web UI can call /api/*
  * - Handles OPTIONS preflight
- * - Simple in-memory rate limit for /api/chat (per-instance, best-effort)
  *
  * Note: For production-grade rate limiting, configure Cloudflare Rate Limiting Rules
- * in the dashboard. This middleware provides a code-level safety net only.
+ * in the dashboard.
  */
 
 // Whitelist of allowed origins for /api/* endpoints
@@ -36,30 +35,6 @@ function isAllowedOrigin(request: Request): boolean {
   return ALLOWED_ORIGINS.some(a => referer.startsWith(a));
 }
 
-// In-memory rate limit buckets — per Worker instance (stateless across cold starts).
-// Maps client IP → { count, resetAt }
-interface Bucket { count: number; resetAt: number; }
-const CHAT_LIMIT_PER_MIN = 10;
-const RATE_LIMIT_WINDOW_MS = 60_000;
-const rateLimitStore: Map<string, Bucket> = new Map();
-
-function checkRateLimit(clientIp: string): { allowed: boolean; remaining: number } {
-  const now = Date.now();
-  const bucket = rateLimitStore.get(clientIp);
-
-  if (!bucket || now > bucket.resetAt) {
-    rateLimitStore.set(clientIp, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
-    return { allowed: true, remaining: CHAT_LIMIT_PER_MIN - 1 };
-  }
-
-  if (bucket.count >= CHAT_LIMIT_PER_MIN) {
-    return { allowed: false, remaining: 0 };
-  }
-
-  bucket.count++;
-  return { allowed: true, remaining: CHAT_LIMIT_PER_MIN - bucket.count };
-}
-
 export const onRequest: PagesFunction<Env> = async (context) => {
   const { request } = context;
   const url = new URL(request.url);
@@ -76,25 +51,6 @@ export const onRequest: PagesFunction<Env> = async (context) => {
       status: 403,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
-  }
-
-  // Rate limit /api/chat
-  if (url.pathname === '/api/chat' && request.method === 'POST') {
-    const clientIp = request.headers.get('CF-Connecting-IP') ?? 'unknown';
-    const { allowed, remaining } = checkRateLimit(clientIp);
-    if (!allowed) {
-      return new Response(JSON.stringify({ error: 'Rate limit exceeded. Try again in 1 minute.' }), {
-        status: 429,
-        headers: {
-          ...corsHeaders,
-          'Content-Type': 'application/json',
-          'Retry-After': '60',
-          'X-RateLimit-Limit': String(CHAT_LIMIT_PER_MIN),
-          'X-RateLimit-Remaining': '0',
-        },
-      });
-    }
-    console.log(`[rate-limit] ${clientIp}: ${CHAT_LIMIT_PER_MIN - remaining}/${CHAT_LIMIT_PER_MIN}`);
   }
 
   try {

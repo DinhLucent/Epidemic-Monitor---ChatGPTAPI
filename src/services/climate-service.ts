@@ -20,10 +20,18 @@ export interface ClimateForecast {
   hfmdRisk:    number;
   dengueLevel: RiskLevel;
   hfmdLevel:   RiskLevel;
+  airQualityRisk: number;
+  airQualityLevel: RiskLevel;
+  respiratoryRisk: number;
+  respiratoryLevel: RiskLevel;
   tempMax:     number;
   tempMin:     number;
   rainfall:    number;
   humidity:    number;
+  pm25?:       number;
+  pm10?:       number;
+  ozone?:      number;
+  nitrogenDioxide?: number;
   forecastDays: number;
   peakRiskDay:  string;
 }

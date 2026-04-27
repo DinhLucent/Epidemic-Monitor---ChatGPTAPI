@@ -1,0 +1,162 @@
+[
+  {
+    "id": "sxh-binh-duong-001",
+    "title": "Bình Dương ghi nhận ổ dịch sốt xuất huyết tại Thủ Dầu Một",
+    "article": "Ngày 11/4/2026, Sở Y tế Bình Dương cho biết phường Phú Hòa, TP Thủ Dầu Một ghi nhận 128 ca sốt xuất huyết trong 3 tuần gần đây. Hai bệnh nhân tử vong sau khi nhập viện cấp cứu tại Bệnh viện Đa khoa tỉnh. Lực lượng y tế đã phun hóa chất, điều tra ổ dịch và khuyến cáo người dân loại bỏ lăng quăng quanh nhà.",
+    "expected": {
+      "disease_vn": "sốt xuất huyết",
+      "province": "Bình Dương",
+      "district": "Thủ Dầu Một",
+      "ward": "Phú Hòa",
+      "cases": 128,
+      "deaths": 2,
+      "severity": "outbreak",
+      "date": "2026-04-11",
+      "is_outbreak_news": true
+    }
+  },
+  {
+    "id": "soi-tphcm-002",
+    "title": "TP HCM tăng ca sởi tại Bình Tân",
+    "article": "Trung tâm Kiểm soát bệnh tật TP HCM thông tin ngày 28/3/2026, quận Bình Tân đã ghi nhận 37 ca sởi ở trẻ em trong vòng 10 ngày. Các ca bệnh tập trung quanh các lớp mầm non tư nhân, chưa ghi nhận trường hợp tử vong. Ngành y tế đang tổ chức tiêm vét và giám sát tiếp xúc gần.",
+    "expected": {
+      "disease_vn": "sởi",
+      "province": "TP HCM",
+      "district": "Bình Tân",
+      "ward": null,
+      "cases": 37,
+      "deaths": 0,
+      "severity": "outbreak",
+      "date": "2026-03-28",
+      "is_outbreak_news": true
+    }
+  },
+  {
+    "id": "ngo-doc-quang-nam-003",
+    "title": "56 học sinh nghi ngộ độc thực phẩm tại Quảng Nam",
+    "article": "Ngày 05/4/2026, Bệnh viện Đa khoa khu vực Quảng Nam tiếp nhận 56 học sinh Trường THCS Nguyễn Du, huyện Thăng Bình, tỉnh Quảng Nam với triệu chứng đau bụng, nôn ói sau bữa ăn trường. Sở Y tế nhận định đây là chùm ca ngộ độc thực phẩm, hiện chưa ghi nhận trường hợp tử vong và đang lấy mẫu xét nghiệm.",
+    "expected": {
+      "disease_vn": "ngộ độc thực phẩm",
+      "province": "Quảng Nam",
+      "district": "Thăng Bình",
+      "ward": null,
+      "cases": 56,
+      "deaths": 0,
+      "severity": "warning",
+      "date": "2026-04-05",
+      "is_outbreak_news": true
+    }
+  },
+  {
+    "id": "dai-gia-lai-004",
+    "title": "Gia Lai ghi nhận ca tử vong do bệnh dại",
+    "article": "Ngày 02/4/2026, Trung tâm Y tế huyện Chư Sê, tỉnh Gia Lai xác nhận một người dân 41 tuổi tử vong do bệnh dại sau khi bị chó cắn. Ngành y tế đã lập danh sách những người tiếp xúc gần và triển khai tiêm phòng cho vật nuôi tại khu vực liên quan.",
+    "expected": {
+      "disease_vn": "bệnh dại",
+      "province": "Gia Lai",
+      "district": "Chư Sê",
+      "ward": null,
+      "cases": 1,
+      "deaths": 1,
+      "severity": "warning",
+      "date": "2026-04-02",
+      "is_outbreak_news": true
+    }
+  },
+  {
+    "id": "khuyen-cao-cum-005",
+    "title": "Bộ Y tế khuyến cáo phòng cúm mùa dịp nghỉ lễ",
+    "article": "Bộ Y tế ngày 08/4/2026 khuyến cáo người dân rửa tay thường xuyên, đeo khẩu trang khi đến nơi đông người và tiêm vaccine phòng cúm mùa cho nhóm nguy cơ cao. Thông báo này là hướng dẫn dự phòng trên phạm vi toàn quốc, không đề cập ổ dịch cụ thể nào hay số ca mắc mới.",
+    "expected": {
+      "disease_vn": "cúm mùa",
+      "province": null,
+      "district": null,
+      "ward": null,
+      "cases": null,
+      "deaths": null,
+      "severity": "watch",
+      "date": "2026-04-08",
+      "is_outbreak_news": false
+    }
+  },
+  {
+    "id": "tieu-chay-quang-binh-006",
+    "title": "Quảng Bình ghi nhận chùm ca tiêu chảy cấp sau mưa lớn",
+    "article": "Báo cáo ngày 09/4/2026 của Sở Y tế Quảng Bình cho biết xã An Thủy, huyện Lệ Thủy đã ghi nhận 23 ca tiêu chảy cấp sau đợt mưa lớn kéo dài. Các bệnh nhân được điều trị ngoại trú, chưa ghi nhận trường hợp tử vong. Địa phương đang khuyến cáo người dân đun sôi nước uống và khử trùng giếng khoan.",
+    "expected": {
+      "disease_vn": "tiêu chảy cấp",
+      "province": "Quảng Bình",
+      "district": "Lệ Thủy",
+      "ward": "An Thủy",
+      "cases": 23,
+      "deaths": 0,
+      "severity": "warning",
+      "date": "2026-04-09",
+      "is_outbreak_news": true
+    }
+  },
+  {
+    "id": "who-soi-chau-au-007",
+    "title": "WHO cảnh báo sởi tăng mạnh ở châu Âu",
+    "article": "Trong bản tin ngày 01/4/2026, WHO cảnh báo số ca sởi đang tăng mạnh tại nhiều quốc gia châu Âu do tỷ lệ tiêm chủng giảm. Bản tin đưa ra khuyến nghị tiêm vaccine đầy đủ và tăng cường giám sát, nhưng không đề cập ổ dịch cụ thể nào tại Việt Nam.",
+    "expected": {
+      "disease_vn": "sởi",
+      "province": null,
+      "district": null,
+      "ward": null,
+      "cases": null,
+      "deaths": null,
+      "severity": "watch",
+      "date": "2026-04-01",
+      "is_outbreak_news": false
+    }
+  },
+  {
+    "id": "tcm-can-tho-008",
+    "title": "Cần Thơ ghi nhận nhiều ca tay chân miệng tại Ninh Kiều",
+    "article": "Ngày 10/4/2026, CDC Cần Thơ cho biết phường An Khánh, quận Ninh Kiều ghi nhận 84 ca tay chân miệng trong tháng qua, tăng gấp đôi so với cùng kỳ. Chưa có trường hợp tử vong. Các trường mầm non trong khu vực được yêu cầu khử khuẩn đồ chơi và theo dõi trẻ có sốt, loét miệng.",
+    "expected": {
+      "disease_vn": "tay chân miệng",
+      "province": "Cần Thơ",
+      "district": "Ninh Kiều",
+      "ward": "An Khánh",
+      "cases": 84,
+      "deaths": 0,
+      "severity": "outbreak",
+      "date": "2026-04-10",
+      "is_outbreak_news": true
+    }
+  },
+  {
+    "id": "khuyen-cao-covid-009",
+    "title": "Chuyên gia nhắc nhóm nguy cơ cao phòng COVID-19",
+    "article": "Ngày 07/4/2026, các chuyên gia truyền nhiễm khuyến cáo người cao tuổi, người có bệnh nền nên tiêm nhắc vaccine COVID-19 trước mùa du lịch hè. Bài viết phân tích nguy cơ biến chứng ở nhóm dễ tổn thương, không đưa ra số liệu ổ dịch hay địa điểm cụ thể nào.",
+    "expected": {
+      "disease_vn": "COVID-19",
+      "province": null,
+      "district": null,
+      "ward": null,
+      "cases": null,
+      "deaths": null,
+      "severity": "watch",
+      "date": "2026-04-07",
+      "is_outbreak_news": false
+    }
+  },
+  {
+    "id": "ho-ga-dak-lak-010",
+    "title": "Đắk Lắk giám sát chùm ca ho gà ở Krông Pắc",
+    "article": "Theo báo cáo ngày 03/4/2026, xã Ea Kly, huyện Krông Pắc, tỉnh Đắk Lắk ghi nhận 12 ca ho gà trong cộng đồng, chủ yếu là trẻ chưa tiêm đủ mũi vaccine. Chưa ghi nhận tử vong. Trạm y tế xã đang lập danh sách trẻ tiếp xúc gần để theo dõi sức khỏe và tiêm bổ sung.",
+    "expected": {
+      "disease_vn": "ho gà",
+      "province": "Đắk Lắk",
+      "district": "Krông Pắc",
+      "ward": "Ea Kly",
+      "cases": 12,
+      "deaths": 0,
+      "severity": "warning",
+      "date": "2026-04-03",
+      "is_outbreak_news": true
+    }
+  }
+]

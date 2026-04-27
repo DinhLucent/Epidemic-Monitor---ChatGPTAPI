@@ -11,8 +11,9 @@ const BASEMAP_PRIMARY = 'https://tiles.openfreemap.org/styles/bright';
 const BASEMAP_FALLBACK = 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json';
 
 /** Default center: Vietnam [lng, lat] */
-const DEFAULT_CENTER: [number, number] = [107.5, 15.5];
-const DEFAULT_ZOOM = 6;
+const DEFAULT_CENTER: [number, number] = [106.3, 16.2];
+const DEFAULT_ZOOM = 5.6;
+const VIETNAM_BOUNDS: [[number, number], [number, number]] = [[101.0, 7.4], [110.8, 23.6]];
 
 /**
  * Thin wrapper around a MapLibre GL map with a deck.gl overlay.
@@ -33,9 +34,10 @@ export class MapShell {
       style: BASEMAP_PRIMARY,
       center: DEFAULT_CENTER,
       zoom: DEFAULT_ZOOM,
-      minZoom: 4,
+      minZoom: 5,
       maxZoom: 14,
-      maxBounds: [[95.0, 5.0], [118.0, 26.0]],
+      maxBounds: VIETNAM_BOUNDS,
+      renderWorldCopies: false,
       attributionControl: false,
       dragRotate: false,
       pitchWithRotate: false,
@@ -105,6 +107,23 @@ export class MapShell {
   private _applyVietnameseLabelOverrides(): void {
     const style = this.map.getStyle();
     if (!style?.layers) return;
+
+    // Hide generic basemap place labels. The app overlays its own Vietnam
+    // disease geography, while global basemap labels can make the bounded
+    // Vietnam view look like it includes neighboring countries.
+    const globalPlaceLabelPatterns = /place|poi|settlement|country|state|city|town|village|hamlet/i;
+    const keepLabelPatterns = /water|marine|ocean|sea/i;
+    for (const layer of style.layers) {
+      if (layer.type !== 'symbol') continue;
+      if (layer.id === 'vn-sea-labels-text') continue;
+      if (!globalPlaceLabelPatterns.test(layer.id)) continue;
+      if (keepLabelPatterns.test(layer.id)) continue;
+      try {
+        this.map.setLayoutProperty(layer.id, 'visibility', 'none');
+      } catch {
+        // Some style layers may not accept runtime layout changes.
+      }
+    }
 
     // 1) Rewrite text on any water/marine label layer that currently shows
     //    "South China Sea". Covers common OpenMapTiles / CartoDB patterns.

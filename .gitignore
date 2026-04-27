@@ -10,3 +10,19 @@ playwright-report/
 .vercel
 .wrangler/
 .env*.local
+
+# SHIELD runtime (embedded)
+.shield
+.shield/runtime/
+.shield/hub/
+.shield/.hub/
+.shield/knowledge/compiled/
+.shield/knowledge/memory/
+.shield/.playwright-cli/
+.shield/**/__pycache__/
+.shield/**/*.pyc
+.understand-anything/
+
+.chatgpt-to-sdk
+
+skilss

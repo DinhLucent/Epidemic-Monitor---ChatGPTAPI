@@ -4,6 +4,7 @@
  */
 import { ScatterplotLayer } from '@deck.gl/layers';
 import type { EarlyWarning } from '@/services/trend-calculator';
+import { isInsideVietnamMapBounds } from './vietnam-map-scope';
 
 /**
  * Build a ScatterplotLayer for early warning provinces.
@@ -15,7 +16,7 @@ export function createEarlyWarningLayer(
 ): ScatterplotLayer<EarlyWarning> {
   return new ScatterplotLayer<EarlyWarning>({
     id: 'early-warnings',
-    data: warnings,
+    data: warnings.filter(w => isInsideVietnamMapBounds(w.lat, w.lng)),
     getPosition: (d) => [d.lng, d.lat],
     getRadius: 20000,
     getFillColor: [255, 193, 7, 140],   // amber/yellow — distinct from red outbreak markers

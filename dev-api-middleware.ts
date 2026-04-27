@@ -6,15 +6,39 @@ import type { Plugin } from 'vite';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import { diseaseLabel } from './src/components/case-report-panel-data';
+import { createSdkOutbreakExtractor, type BatchClassifyItem, type BatchClassifyResult } from './src/services/local-ai/sdk-model-driver';
+import {
+  type GeoPrecision,
+  scoreOutbreakEvidence,
+  summarizeSources,
+} from './functions/_shared/source-registry';
+import { canonicalProvinceName, VIETNAM_PROVINCES_2025 } from './functions/_shared/vietnam-provinces';
 
 // Load .env.local into process.env for dev API middleware
+const ENV_LOCAL_PATH = resolve(process.cwd(), '.env.local');
+
+function parseEnvValue(value: string): string {
+  const trimmed = value.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      return trimmed.slice(1, -1);
+    }
+  }
+  return trimmed;
+}
+
 try {
-  const envLocal = readFileSync(resolve(process.cwd(), '.env.local'), 'utf-8');
+  const envLocal = readFileSync(ENV_LOCAL_PATH, 'utf-8');
   for (const line of envLocal.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#') || !trimmed.includes('=')) continue;
     const [key, ...rest] = trimmed.split('=');
-    if (key && !(key.trim() in process.env)) process.env[key.trim()] = rest.join('=').trim();
+    if (key && !(key.trim() in process.env)) process.env[key.trim()] = parseEnvValue(rest.join('='));
   }
 } catch { /* .env.local optional */ }
 
@@ -30,6 +54,31 @@ function setCached(key: string, data: unknown, ttlMs: number): void {
   cache.set(key, { data, expiry: Date.now() + ttlMs });
 }
 
+function splitKeys(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map(String).map((k) => k.trim()).filter(Boolean);
+  }
+  if (typeof value !== 'string') return [];
+  return value
+    .split(/[\r\n,]+/)
+    .map((k) => k.trim())
+    .filter(Boolean);
+}
+
+function configuredKeys(): string[] {
+  const keys = splitKeys(process.env.CHATGPT2API_AUTH_KEYS);
+  if (keys.length > 0) return keys;
+  return splitKeys(process.env.CHATGPT2API_AUTH_KEY);
+}
+
+function configuredBaseUrl(): string {
+  return process.env.CHATGPT2API_BASE_URL?.trim() ?? '';
+}
+
+function configuredModel(): string {
+  return process.env.CHATGPT2API_MODEL ?? 'auto';
+}
+
 // ---------------------------------------------------------------------------
 // RSS parsing (same regex approach as Edge functions)
 // ---------------------------------------------------------------------------
@@ -42,7 +91,7 @@ function extractTag(xml: string, tag: string): string {
 function extractLink(block: string): string {
   // Handle both plain text and CDATA-wrapped links
   const lm = block.match(/<link>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/link>/s);
-  if (lm && lm[1].trim()) return lm[1].trim(); 
+  if (lm && lm[1].trim()) return lm[1].trim();
   const gm = block.match(/<guid[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/guid>/s);
   return gm ? gm[1].trim() : '';
 }
@@ -53,6 +102,17 @@ function hashStr(s: string): string {
   let h = 0;
   for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
   return Math.abs(h).toString(16);
+}
+
+function canonicalUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    url.hash = '';
+    url.search = '';
+    return url.toString().replace(/\/$/, '').toLowerCase();
+  } catch {
+    return value.trim().toLowerCase();
+  }
 }
 
 interface RssItem { title: string; link: string; pubDate: string; description: string; }
@@ -145,6 +205,7 @@ const VN_PROVINCES: Record<string, [number, number]> = {
   'Bạc Liêu': [9.29, 105.72], 'Cà Mau': [9.18, 105.15],
 };
 
+
 /** Remove Vietnamese diacritics for fuzzy province matching in article text */
 function removeDiacritics(s: string): string {
   return s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/gi, 'd').toLowerCase();
@@ -155,6 +216,13 @@ function matchDisease(text: string) {
     if (kw.p.test(text)) return { disease: kw.d, alert: kw.a };
   }
   return null;
+}
+
+function refineAlert(text: string, base: string) {
+  const l = text.toLowerCase();
+  if (/bùng phát|tử vong|chết|khẩn cấp|outbreak|emergency/.test(l)) return 'alert';
+  if (/tăng mạnh|tăng cao|lan rộng|cảnh báo/.test(l)) return 'warning';
+  return base;
 }
 
 function findProvince(text: string) {
@@ -170,11 +238,10 @@ function findProvince(text: string) {
   return null;
 }
 
-function refineAlert(text: string, base: string) {
-  const l = text.toLowerCase();
-  if (/bùng phát|tử vong|chết|khẩn cấp|outbreak|emergency/.test(l)) return 'alert';
-  if (/tăng mạnh|tăng cao|lan rộng|cảnh báo/.test(l)) return 'warning';
-  return base;
+function isVietnamRelated(text: string): boolean {
+  const norm = removeDiacritics(text);
+  return Boolean(findProvince(text))
+    || /\b(viet nam|vietnam|vn|toan quoc|trong nuoc|bo y te|so y te|cdc)\b/i.test(norm);
 }
 
 // ---------------------------------------------------------------------------
@@ -190,8 +257,6 @@ async function handleNews(): Promise<unknown> {
     { name: 'Tuổi Trẻ', url: 'https://tuoitre.vn/rss/suc-khoe.rss' },
     { name: 'Thanh Niên', url: 'https://thanhnien.vn/rss/suc-khoe.rss' },
     { name: 'Dân Trí', url: 'https://dantri.com.vn/rss/suc-khoe.rss' },
-    { name: 'WHO', url: 'https://www.who.int/rss-feeds/news-english.xml' },
-    { name: 'CDC-EID', url: 'https://wwwnc.cdc.gov/eid/rss/upcoming.xml' },
   ];
 
   const results = await Promise.allSettled(sources.map(async (s) => {
@@ -216,8 +281,13 @@ async function handleNews(): Promise<unknown> {
   }
 
   const seen = new Set<string>();
-  const deduped = (items as Array<{ id: string; publishedAt: number }>)
-    .filter(it => { if (seen.has(it.id)) return false; seen.add(it.id); return true; })
+  const deduped = (items as Array<{ id: string; title?: string; url?: string; publishedAt: number }>)
+    .filter(it => {
+      const key = it.url ? canonicalUrl(it.url) : `${it.id}:${String(it.title ?? '').toLowerCase()}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
     .sort((a, b) => b.publishedAt - a.publishedAt)
     .slice(0, 50);
 
@@ -235,192 +305,97 @@ interface OutbreakItem {
   publishedAt: number; lat?: number; lng?: number; province?: string;
   district?: string; cases?: number; deaths?: number; source: string;
   isOutbreakNews?: boolean;
+  sourceCount?: number; sourceLabels?: string[]; officialConfirmed?: boolean;
+  riskScore?: number; confidence?: number; riskFactors?: string[];
+  extractionWarnings?: string[]; geoPrecision?: GeoPrecision;
+  latestArticlePublishedAt?: number; pipelineUpdatedAt?: number;
 }
 
-// Secret MUST come from environment — never hardcode. If missing, LLM
-// extraction is skipped (the middleware returns articles without
-// enrichment, which is acceptable for local dev).
-const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY ?? '';
-
-const LLM_EXTRACTION_PROMPT = `Bạn là chuyên gia phân tích dữ liệu sức khoẻ cộng đồng. Extract thông tin từ bài báo y tế Việt Nam.
-Trả về JSON với các trường:
-- disease_vn: tên bệnh tiếng Việt
-- province: tên tỉnh/thành. null nếu không có
-- district: tên quận/huyện. null nếu không có
-- ward: tên phường/xã. null nếu không có
-- cases: số ca bệnh (int). null nếu không đề cập
-- deaths: số tử vong (int). null nếu không đề cập
-- severity: "outbreak" | "warning" | "watch"
-- date: ngày sự kiện (YYYY-MM-DD). null nếu không rõ
-- is_outbreak_news: true nếu tin sức khoẻ cộng đồng CỤ THỂ (có ca, có địa điểm), false nếu bài hướng dẫn sức khỏe chung
-- summary_vi: tóm tắt 1 câu
-Return JSON ONLY.`;
-
-/** Call minimax m2.7 via OpenRouter to extract structured data from article text */
-async function llmExtract(articleText: string): Promise<Record<string, unknown> | null> {
-  if (!OPENROUTER_KEY || articleText.length < 100) return null;
-
-  try {
-    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${OPENROUTER_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'minimax/minimax-m2.7',
-        messages: [
-          { role: 'system', content: LLM_EXTRACTION_PROMPT },
-          { role: 'user', content: articleText.slice(0, 3000) },
-        ],
-        response_format: { type: 'json_object' },
-      }),
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!res.ok) return null;
-    const data = await res.json() as { choices: Array<{ message: { content: string } }> };
-    const content = data.choices?.[0]?.message?.content;
-    if (!content) return null;
-    return JSON.parse(content.replace(/^```json?\n?/, '').replace(/\n?```$/, ''));
-  } catch {
-    return null;
-  }
+function normalizedAlert(level: string): 'alert' | 'warning' | 'watch' {
+  return level === 'alert' || level === 'warning' ? level : 'watch';
 }
 
-/** Fetch article via simple HTTP + extract entities with LLM. Fast path (no crawl4ai browser). */
-async function fetchAndExtract(url: string): Promise<Record<string, unknown> | null> {
-  const cacheKey = `enriched:${url}`;
-  const cached = getCached<Record<string, unknown>>(cacheKey);
-  if (cached) return cached;
-
-  try {
-    // Simple fetch (works for VnExpress, Tuổi Trẻ SSR pages)
-    const res = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; EpidemicMonitor/1.0)' },
-      signal: AbortSignal.timeout(8000),
-      redirect: 'follow',
-    });
-    if (!res.ok) return null;
-    const html = await res.text();
-
-    // Extract article body
-    const bodyPatterns = [
-      /<article[^>]*>([\s\S]*?)<\/article>/i,
-      /<div[^>]*class="[^"]*(?:fck_detail|article-body|content-detail|singular-content|detail-content|the-article-body)[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
-    ];
-    let body = '';
-    for (const p of bodyPatterns) {
-      const m = html.match(p);
-      if (m) { body = m[1] || m[0]; if (body.length > 200) break; }
-    }
-    // Fallback: strip all HTML
-    if (body.length < 100) body = html;
-    body = body.replace(/<[^>]+>/g, '').replace(/&\w+;/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 3000);
-    if (body.length < 100) return null;
-
-    // LLM extract via minimax m2.7
-    const extracted = await llmExtract(body);
-    if (extracted) {
-      console.info(`[enrich] ✓ ${url.slice(0, 40)} → cases=${extracted.cases} dist=${extracted.district} outbreak=${extracted.is_outbreak_news}`);
-      setCached(cacheKey, extracted, 6 * 60 * 60_000);
-    }
-    return extracted;
-  } catch {
-    return null;
-  }
-}
-
-/** Enrich top N outbreak items with simple fetch + LLM extraction */
-async function enrichTopArticles(items: OutbreakItem[]): Promise<void> {
-  // Only enrich VN news items (not WHO-DON, which already has structure)
-  const vnItems = items.filter(o => o.source !== 'WHO-DON' && o.url && o.url.length > 30);
-  // Enrich top 10 most recent — sequential to avoid rate limits
-  const toEnrich = vnItems.slice(0, 10);
-
-  // Run in batches of 3 (parallel within batch, sequential between batches)
-  const results: Array<Record<string, unknown> | null> = new Array(toEnrich.length).fill(null);
-  for (let batch = 0; batch < toEnrich.length; batch += 3) {
-    const batchItems = toEnrich.slice(batch, batch + 3);
-    const batchResults = await Promise.allSettled(
-      batchItems.map(item => fetchAndExtract(item.url))
-    );
-    for (let j = 0; j < batchResults.length; j++) {
-      const r = batchResults[j];
-      results[batch + j] = r.status === 'fulfilled' ? r.value : null;
-    }
-  }
-
-  for (let i = 0; i < results.length; i++) {
-    const extracted = results[i];
-    if (!extracted) continue;
-    const item = toEnrich[i];
-
-    // Apply extracted data
-    if (extracted.cases != null) item.cases = Number(extracted.cases) || undefined;
-    if (extracted.deaths != null) item.deaths = Number(extracted.deaths) || undefined;
-    if (extracted.district) item.district = String(extracted.district);
-    if (extracted.ward) item.district = `${extracted.ward}, ${extracted.district || ''}`.trim();
-    if (extracted.province && !item.province) item.province = String(extracted.province);
-    if (extracted.is_outbreak_news === false) item.isOutbreakNews = false;
-    if (extracted.severity === 'outbreak') item.alertLevel = 'alert';
-    if (extracted.summary_vi) item.summary = String(extracted.summary_vi);
-
-    // Update coordinates if we got a more specific location
-    const locText = `${extracted.ward || ''} ${extracted.district || ''} ${extracted.province || ''}`;
-    const wardMatch = findProvince(locText);
-    if (wardMatch) { item.lat = wardMatch.coords[0]; item.lng = wardMatch.coords[1]; }
-  }
-
-  // Filter out non-outbreak health guides
-  const removeIndices = new Set<number>();
-  for (let i = items.length - 1; i >= 0; i--) {
-    if ((items[i] as OutbreakItem).isOutbreakNews === false) removeIndices.add(i);
-  }
-  // Remove from end to preserve indices
-  for (const idx of Array.from(removeIndices).sort((a, b) => b - a)) {
-    items.splice(idx, 1);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// WHO Disease Outbreak News REST API — structured global outbreak data
-// ---------------------------------------------------------------------------
-async function fetchWhoDon(): Promise<unknown[]> {
-  const url = 'https://www.who.int/api/news/diseaseoutbreaknews?$orderby=PublicationDate%20desc&$top=30';
-  const res = await fetch(url, { signal: AbortSignal.timeout(12000), headers: { Accept: 'application/json' } });
-  if (!res.ok) throw new Error(`WHO DON API ${res.status}`);
-  const data = await res.json() as { value: Array<Record<string, unknown>> };
-  return (data.value || []).map(item => {
-    const title = typeof item.Title === 'object' ? (item.Title as Record<string, string>)?.Value ?? '' : String(item.Title ?? '');
-    const summary = typeof item.Summary === 'object' ? (item.Summary as Record<string, string>)?.Value ?? '' : String(item.Summary ?? '');
-    const urlPath = typeof item.ItemDefaultUrl === 'object' ? (item.ItemDefaultUrl as Record<string, string>)?.Value ?? '' : String(item.ItemDefaultUrl ?? '');
-    const fullUrl = urlPath.startsWith('/') ? `https://www.who.int${urlPath}` : urlPath;
-    const pubDate = String(item.PublicationDate ?? '');
-
-    // Extract disease and country from title pattern "Disease - Country"
-    const sep = title.indexOf(' - ');
-    const disease = sep !== -1 ? title.slice(0, sep).trim() : title;
-    const country = sep !== -1 ? title.slice(sep + 3).trim() : '';
-
-    const lower = title.toLowerCase();
-    const alertLevel = /outbreak|emergency|death/.test(lower) ? 'alert' as const
-      : /update|additional/.test(lower) ? 'warning' as const : 'watch' as const;
-
-    return {
-      id: hashStr(`WHO-DON:${fullUrl || title}`),
-      disease,
-      country: country || 'Global',
-      countryCode: '',
-      alertLevel,
-      title,
-      summary: stripHtml(summary).slice(0, 300),
-      url: fullUrl,
-      publishedAt: pubDate ? new Date(pubDate).getTime() : Date.now(),
-      source: 'WHO-DON',
-    };
+function withEvidenceMeta(
+  item: OutbreakItem,
+  sourceUrls = item.url,
+  sourceNames = item.source,
+  articleCount = 1,
+): OutbreakItem {
+  const sources = summarizeSources(sourceUrls, sourceNames);
+  const geoPrecision: GeoPrecision = item.district ? 'district' : item.province ? 'province' : 'unknown';
+  const score = scoreOutbreakEvidence({
+    articleCount,
+    casesPerMillion: 0,
+    daysOld: Math.max(0, (Date.now() - item.publishedAt) / 86_400_000),
+    alertLevel: normalizedAlert(item.alertLevel),
+    geoPrecision,
+    sources,
   });
+  return {
+    ...item,
+    sourceCount: sources.sourceCount,
+    sourceLabels: sources.labels.slice(0, 4),
+    officialConfirmed: sources.officialConfirmed,
+    riskScore: score.riskScore,
+    confidence: score.confidence,
+    riskFactors: score.riskFactors,
+    extractionWarnings: score.extractionWarnings,
+    geoPrecision,
+    latestArticlePublishedAt: item.publishedAt,
+    pipelineUpdatedAt: Date.now(),
+  };
 }
 
+function maxTimestamp(values: Array<number | undefined>): number | undefined {
+  const valid = values.filter((value): value is number => value !== undefined && Number.isFinite(value) && value > 0);
+  return valid.length > 0 ? Math.max(...valid) : undefined;
+}
+
+function buildFreshness(outbreaks: OutbreakItem[], newsItems: Array<{ source?: string; publishedAt?: number }>) {
+  const sources = new Set<string>();
+  for (const outbreak of outbreaks) {
+    for (const label of outbreak.sourceLabels ?? []) sources.add(label);
+    if (outbreak.source) sources.add(outbreak.source);
+  }
+  for (const item of newsItems) {
+    if (item.source) sources.add(item.source);
+  }
+  return {
+    apiFetchedAt: Date.now(),
+    pipelineUpdatedAt: maxTimestamp(outbreaks.map((outbreak) => outbreak.pipelineUpdatedAt)),
+    latestArticlePublishedAt: maxTimestamp([
+      ...outbreaks.map((outbreak) => outbreak.latestArticlePublishedAt ?? outbreak.publishedAt),
+      ...newsItems.map((item) => item.publishedAt),
+    ]),
+    sourceCount: sources.size,
+  };
+}
+
+// Secrets MUST come from .env.local or the dev settings endpoint. If missing,
+// SDK extraction is skipped and the middleware returns articles without enrichment.
+const sdkOutbreakExtractors = new Map<string, ReturnType<typeof createSdkOutbreakExtractor>>();
+
+function getSdkOutbreakExtractor(apiKey?: string): ReturnType<typeof createSdkOutbreakExtractor> | null {
+  if (!configuredBaseUrl()) return null;
+
+  const extractorKey = `${configuredBaseUrl()}|${configuredModel()}|${apiKey ?? 'no-token'}`;
+  let extractor = sdkOutbreakExtractors.get(extractorKey);
+  if (!extractor) {
+    extractor = createSdkOutbreakExtractor({
+      baseUrl: configuredBaseUrl(),
+      apiKey,
+      model: configuredModel(),
+      stateRoot: '.chatgpt-to-sdk/dev-api',
+      includeExamples: false,
+      experimental: true,
+    });
+    sdkOutbreakExtractors.set(extractorKey, extractor);
+  }
+  return extractor;
+}
+
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 /** Fetch pipeline hotspots from Cloudflare Worker + D1 (same logic as Edge function). */
 async function fetchPipelineHotspots(): Promise<unknown[]> {
   const apiUrl = process.env.EPIDEMIC_API_URL;
@@ -443,21 +418,27 @@ async function fetchPipelineHotspots(): Promise<unknown[]> {
     const data = await res.json() as { hotspots: Record<string, unknown>[] };
     return (data.hotspots ?? []).map((h) => {
       const districtIdSuf = h.district ? `:${h.district}` : '';
-      return {
+      const item = {
         id: `pipeline:${h.disease}:${h.province}${districtIdSuf}:${h.day}`,
         disease: String(h.disease ?? ''),
         country: 'Vietnam',
         countryCode: 'VN',
-        alertLevel: (h.peak_alert as string) ?? 'watch',
+        alertLevel: String(h.peak_alert ?? 'watch'),
         title: `${diseaseLabel(String(h.disease ?? ''))} tại ${h.district ? h.district + ', ' : ''}${h.province}`,
         summary: `${h.article_count} nguồn (${h.source_types}). Số ca: ${h.peak_cases ?? 'N/A'}`,
         url: String((h.source_urls as string)?.split('|')[0] ?? ''),
         publishedAt: new Date(String(h.day)).getTime(),
         province: String(h.province ?? ''),
-        district: h.district ?? undefined,
+        district: h.district ? String(h.district) : undefined,
         source: `pipeline:${String(h.source_types ?? '')}`,
         cases: h.peak_cases ? Number(h.peak_cases) : undefined,
       };
+      return withEvidenceMeta(
+        item,
+        String(h.source_urls ?? ''),
+        String(h.source_types ?? ''),
+        Number(h.article_count ?? 1),
+      );
     });
   }));
 
@@ -466,6 +447,146 @@ async function fetchPipelineHotspots(): Promise<unknown[]> {
     if (r.status === 'fulfilled') all.push(...r.value);
   }
   return all.sort((a: any, b: any) => (b.publishedAt ?? 0) - (a.publishedAt ?? 0));
+}
+
+/** Stage 1: Use ChatGPT to classify all RSS articles in batch */
+async function batchClassifyArticles(
+  items: Array<{ title: string; description: string; link: string; pubDate: string; sourceName: string }>,
+): Promise<Array<{ item: typeof items[0]; disease: string; alert: string }>> {
+  const extractor = getSdkOutbreakExtractor();
+  if (!extractor) {
+    console.warn('[classify] SDK unavailable, using conservative VN-only keyword fallback');
+    return items.flatMap((item) => {
+      const text = `${item.title} ${item.description}`;
+      const disease = matchDisease(text);
+      if (!disease || !isVietnamRelated(text)) return [];
+      return [{
+        item,
+        disease: disease.disease,
+        alert: refineAlert(text, disease.alert),
+      }];
+    });
+  }
+
+  const batchInput: BatchClassifyItem[] = items.map((item, i) => ({
+    index: i,
+    title: item.title,
+    summary: item.description.slice(0, 150),
+  }));
+
+  console.info(`[classify] Sending ${batchInput.length} articles to ChatGPT Stage 1...`);
+  const classified = await extractor.classifyBatch(batchInput);
+  console.info(`[classify] ChatGPT returned ${classified.length} classifications`);
+
+  const outbreaks: Array<{ item: typeof items[0]; disease: string; alert: string }> = [];
+  for (const c of classified) {
+    if (c.classification !== 'OUTBREAK') continue;
+    if (c.index < 0 || c.index >= items.length) continue;
+    outbreaks.push({
+      item: items[c.index],
+      disease: c.disease_vn ?? 'Unknown',
+      alert: c.confidence >= 0.8 ? 'warning' : 'watch',
+    });
+  }
+  console.info(`[classify] ${outbreaks.length} OUTBREAK articles after Stage 1 filter`);
+  return outbreaks;
+}
+
+/** Stage 2: Use ChatGPT to extract detailed data from filtered articles */
+async function batchExtractArticleDetails(
+  classifiedItems: Array<{ item: { title: string; description: string; link: string; pubDate: string; sourceName: string }; disease: string; alert: string }>,
+): Promise<OutbreakItem[]> {
+  const extractor = getSdkOutbreakExtractor();
+  const results: OutbreakItem[] = [];
+
+  for (const { item, alert } of classifiedItems) {
+    let disease = '';
+    // disease comes from classification, may be overridden by LLM extraction
+    const classifiedItem = classifiedItems.find(c => c.item === item);
+    disease = classifiedItem?.disease ?? 'Unknown';
+    let extractedProvince: string | undefined;
+    let extractedDistrict: string | undefined;
+    let extractedCases: number | undefined;
+    let extractedDeaths: number | undefined;
+    let extractedSeverity = alert;
+    let extractedSummary = item.description;
+
+    if (extractor && item.link) {
+      try {
+        const articleBody = await fetchArticleBody(item.link);
+        if (articleBody) {
+          const extracted = await extractor.extract(articleBody, { sourceUrl: item.link });
+          if (extracted) {
+            if (extracted.province) extractedProvince = String(extracted.province);
+            if (extracted.district) extractedDistrict = String(extracted.district);
+            if (extracted.cases != null) extractedCases = Number(extracted.cases) || undefined;
+            if (extracted.deaths != null) extractedDeaths = Number(extracted.deaths) || undefined;
+            if (extracted.severity) extractedSeverity = String(extracted.severity);
+            if (extracted.summary_vi) extractedSummary = String(extracted.summary_vi);
+            if (extracted.disease_vn) disease = String(extracted.disease_vn);
+          }
+        }
+      } catch { /* extraction failed, use Stage 1 data */ }
+    }
+
+    const text = item.title + ' ' + item.description;
+    const prov = extractedProvince
+      ? findProvince(extractedProvince) ?? findProvince(text)
+      : findProvince(text);
+
+    results.push(withEvidenceMeta({
+      id: hashStr(`${item.sourceName}:${item.link}`),
+      disease,
+      country: 'Vietnam',
+      countryCode: 'VN',
+      alertLevel: extractedSeverity as 'alert' | 'warning' | 'watch',
+      title: item.title,
+      summary: extractedSummary,
+      url: item.link,
+      publishedAt: item.pubDate ? new Date(item.pubDate).getTime() : Date.now(),
+      lat: prov?.coords[0] ?? 16.05,
+      lng: prov?.coords[1] ?? 108.22,
+      province: prov?.name ?? extractedProvince,
+      district: extractedDistrict,
+      cases: extractedCases,
+      deaths: extractedDeaths,
+      source: item.sourceName,
+    }));
+  }
+
+  return results;
+}
+
+/** Fetch article body text from URL (lightweight, no browser) */
+async function fetchArticleBody(url: string): Promise<string | null> {
+  const cacheKey = `body:${url}`;
+  const cached = getCached<string>(cacheKey);
+  if (cached) return cached;
+
+  try {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; EpidemicMonitor/1.0)' },
+      signal: AbortSignal.timeout(8000),
+      redirect: 'follow',
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
+    const bodyPatterns = [
+      /<article[^>]*>([\s\S]*?)<\/article>/i,
+      /<div[^>]*class="[^"]*(?:fck_detail|article-body|content-detail|singular-content|detail-content|the-article-body)[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
+    ];
+    let body = '';
+    for (const p of bodyPatterns) {
+      const m = html.match(p);
+      if (m) { body = m[1] || m[0]; if (body.length > 200) break; }
+    }
+    if (body.length < 100) body = html;
+    body = body.replace(/<[^>]+>/g, '').replace(/&\w+;/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 3000);
+    if (body.length >= 100) setCached(cacheKey, body, 6 * 60 * 60_000);
+    return body.length >= 100 ? body : null;
+  } catch {
+    return null;
+  }
 }
 
 async function handleOutbreaks(): Promise<unknown> {
@@ -480,70 +601,49 @@ async function handleOutbreaks(): Promise<unknown> {
     { name: 'Dân Trí', url: 'https://dantri.com.vn/rss/suc-khoe.rss' },
   ];
 
-  const results = await Promise.allSettled(sources.map(async (s) => {
+  const rssResults = await Promise.allSettled(sources.map(async (s) => {
     const xml = await fetchRss(s.url);
-    const items = parseRssItems(xml);
-    const outbreaks: unknown[] = [];
-    for (const item of items) {
-      const text = item.title + ' ' + item.description;
-      const dm = matchDisease(text);
-      if (!dm) continue;
-      const prov = findProvince(text);
-      outbreaks.push({
-        id: hashStr(`${s.name}:${item.link}`),
-        disease: dm.disease,
-        country: 'Vietnam',
-        countryCode: 'VN',
-        alertLevel: refineAlert(text, dm.alert),
-        title: item.title,
-        summary: item.description,
-        url: item.link,
-        publishedAt: item.pubDate ? new Date(item.pubDate).getTime() : Date.now(),
-        lat: prov?.coords[0] ?? 16.05,
-        lng: prov?.coords[1] ?? 108.22,
-        province: prov?.name,
-        source: s.name,
-      });
-    }
-    return outbreaks;
+    return parseRssItems(xml).map(item => ({ ...item, sourceName: s.name }));
   }));
 
-  // Also fetch WHO DON API (structured global outbreak data)
-  const whoDonResult = await Promise.allSettled([fetchWhoDon(), fetchPipelineHotspots()]);
-
-  const all: unknown[] = [];
+  const allRssItems: Array<{ title: string; description: string; link: string; pubDate: string; sourceName: string }> = [];
   const okSources: string[] = [];
-
-  // VN news sources
-  for (let i = 0; i < results.length; i++) {
-    if (results[i].status === 'fulfilled') {
-      all.push(...(results[i] as PromiseFulfilledResult<unknown[]>).value);
+  for (let i = 0; i < rssResults.length; i++) {
+    if (rssResults[i].status === 'fulfilled') {
+      allRssItems.push(...(rssResults[i] as PromiseFulfilledResult<typeof allRssItems>).value);
       okSources.push(sources[i].name);
     }
   }
 
-  // WHO DON
+  const classified = await batchClassifyArticles(allRssItems);
+  const outbreakItems = await batchExtractArticleDetails(classified);
+
+  const whoDonResult = await Promise.allSettled([fetchPipelineHotspots()]);
+  const all: unknown[] = [...outbreakItems];
+
   if (whoDonResult[0].status === 'fulfilled') {
     all.push(...(whoDonResult[0] as PromiseFulfilledResult<unknown[]>).value);
-    okSources.push('WHO-DON');
-  }
-
-  // Pipeline hotspots from Mac Mini (graceful fallback if offline)
-  if (whoDonResult[1].status === 'fulfilled' && (whoDonResult[1].value as unknown[]).length > 0) {
-    all.push(...(whoDonResult[1] as PromiseFulfilledResult<unknown[]>).value);
     okSources.push('pipeline');
   }
 
   const seen = new Set<string>();
-  const deduped = (all as Array<{ id: string; publishedAt: number }>)
-    .filter(it => { if (seen.has(it.id)) return false; seen.add(it.id); return true; })
+  const deduped = (all as Array<{ id: string; title?: string; url?: string; disease?: string; province?: string; publishedAt: number }>)
+    .filter(it => {
+      const key = it.url
+        ? canonicalUrl(it.url)
+        : `${it.disease ?? ''}|${it.province ?? ''}|${String(it.title ?? '').toLowerCase()}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
     .sort((a, b) => b.publishedAt - a.publishedAt);
 
-  // Server-side LLM enrichment: crawl top articles → extract cases/district/ward
-  // Runs during fetch, not background — data arrives already enriched
-  await enrichTopArticles(deduped as unknown as OutbreakItem[]);
-
-  const payload = { outbreaks: deduped, fetchedAt: Date.now(), sources: okSources };
+  const payload = {
+    outbreaks: deduped,
+    fetchedAt: Date.now(),
+    freshness: buildFreshness(deduped as OutbreakItem[], []),
+    sources: okSources,
+  };
   setCached('outbreaks', payload, 10 * 60_000);
   return payload;
 }
@@ -589,16 +689,73 @@ async function handleStats(): Promise<unknown> {
 // ---------------------------------------------------------------------------
 // Climate handler — fetches real Open-Meteo weather data for VN provinces
 // ---------------------------------------------------------------------------
-const CLIMATE_PROVINCES = [
-  { name: 'TP. Hồ Chí Minh', lat: 10.82, lng: 106.63 },
-  { name: 'Hà Nội',           lat: 21.03, lng: 105.85 },
-  { name: 'Đà Nẵng',          lat: 16.05, lng: 108.22 },
-  { name: 'Cần Thơ',          lat: 10.04, lng: 105.79 },
-  { name: 'Hải Phòng',        lat: 20.86, lng: 106.68 },
-  { name: 'Khánh Hòa',        lat: 12.25, lng: 109.05 },
-  { name: 'Bình Dương',       lat: 11.17, lng: 106.65 },
-  { name: 'Đồng Nai',         lat: 10.95, lng: 106.82 },
-];
+async function handleSourceHealth(): Promise<unknown> {
+  const cached = getCached<unknown>('source-health');
+  if (cached) return cached;
+
+  const outbreaksPayload = await handleOutbreaks() as { outbreaks: OutbreakItem[] };
+  const bySource = new Map<string, { source: string; sourceType: string; itemCount: number; outbreakCount: number; latestPublishedAt?: number }>();
+  for (const item of outbreaksPayload.outbreaks) {
+    const source = item.sourceLabels?.[0] ?? item.source ?? 'unknown';
+    const current = bySource.get(source) ?? { source, sourceType: item.source?.split(':')[0] ?? 'web', itemCount: 0, outbreakCount: 0 };
+    current.itemCount += 1;
+    current.outbreakCount += item.disease ? 1 : 0;
+    current.latestPublishedAt = Math.max(current.latestPublishedAt ?? 0, item.publishedAt ?? 0);
+    bySource.set(source, current);
+  }
+
+  const sources = Array.from(bySource.values())
+    .sort((a, b) => b.itemCount - a.itemCount)
+    .map((source) => ({
+      ...source,
+      freshnessHours: source.latestPublishedAt
+        ? Math.round(Math.max(0, Date.now() - source.latestPublishedAt) / 36_000) / 100
+        : undefined,
+    }));
+  const payload = { sources, fetchedAt: Date.now(), windowDays: 14, totalSources: sources.length };
+  setCached('source-health', payload, 10 * 60_000);
+  return payload;
+}
+
+async function handleTimeSeries(url: URL): Promise<unknown> {
+  const outbreaksPayload = await handleOutbreaks() as { outbreaks: OutbreakItem[] };
+  const days = Math.max(7, Math.min(365, Math.round(Number(url.searchParams.get('days') ?? 90) || 90)));
+  const province = url.searchParams.get('province')?.trim() ?? '';
+  const disease = url.searchParams.get('disease')?.trim() ?? '';
+  const from = Date.now() - days * 86_400_000;
+  const buckets = new Map<string, { day: string; disease: string; province: string; alertLevel: string; articleCount: number; cases: number; sourceCount: number }>();
+
+  for (const item of outbreaksPayload.outbreaks) {
+    if ((item.publishedAt ?? 0) < from) continue;
+    if (province && canonicalProvinceName(item.province ?? '') !== canonicalProvinceName(province)) continue;
+    if (disease && item.disease.toLowerCase() !== disease.toLowerCase()) continue;
+    const day = new Date(item.publishedAt).toISOString().slice(0, 10);
+    const key = `${day}|${item.disease}|${item.province ?? ''}`;
+    const current = buckets.get(key) ?? {
+      day,
+      disease: item.disease,
+      province: item.province ?? '',
+      alertLevel: item.alertLevel,
+      articleCount: 0,
+      cases: 0,
+      sourceCount: 0,
+    };
+    current.articleCount += item.sourceCount ?? 1;
+    current.cases = Math.max(current.cases, item.cases ?? 0);
+    current.sourceCount = Math.max(current.sourceCount, item.sourceCount ?? 1);
+    if (item.alertLevel === 'alert' || (item.alertLevel === 'warning' && current.alertLevel === 'watch')) {
+      current.alertLevel = item.alertLevel;
+    }
+    buckets.set(key, current);
+  }
+
+  const points = Array.from(buckets.values())
+    .sort((a, b) => a.day.localeCompare(b.day))
+    .map((point) => ({ ...point, adminProvince: canonicalProvinceName(point.province) }));
+  return { points, fetchedAt: Date.now(), days, filters: { province: province || undefined, disease: disease || undefined } };
+}
+
+const CLIMATE_PROVINCES = VIETNAM_PROVINCES_2025;
 
 function dengueScore(tMax: number, rain: number, hum: number): number {
   const t = tMax >= 25 && tMax <= 35 ? 1 : tMax > 35 ? 0.7 : tMax >= 20 ? 0.3 : 0.1;
@@ -619,11 +776,33 @@ function riskLevel(score: number): string {
   return 'LOW';
 }
 
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<Array<PromiseSettledResult<R>>> {
+  const results: Array<PromiseSettledResult<R>> = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      try {
+        results[index] = { status: 'fulfilled', value: await fn(items[index]!) };
+      } catch (reason) {
+        results[index] = { status: 'rejected', reason };
+      }
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 async function handleClimate(): Promise<unknown> {
   const cached = getCached<unknown>('climate');
   if (cached) return cached;
 
-  const results = await Promise.allSettled(CLIMATE_PROVINCES.map(async (p) => {
+  const results = await mapLimit(CLIMATE_PROVINCES, 4, async (p) => {
     const url = `https://api.open-meteo.com/v1/forecast?latitude=${p.lat}&longitude=${p.lng}&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,relative_humidity_2m_mean&forecast_days=14&timezone=Asia%2FBangkok`;
     const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
     if (!res.ok) throw new Error(`Open-Meteo ${res.status}`);
@@ -636,10 +815,12 @@ async function handleClimate(): Promise<unknown> {
     const hum = +avg(d.relative_humidity_2m_mean).toFixed(1);
     const dr = +dengueScore(tMax, rain, hum).toFixed(2);
     const hr = +hfmdScore(tMax, hum).toFixed(2);
+    const airQualityRisk = 0;
+    const respiratoryRisk = +(Math.min(1, (hum >= 85 ? 0.16 : hum >= 75 ? 0.11 : 0.05) + (tMax >= 35 ? 0.08 : tMax >= 30 ? 0.05 : 0.02))).toFixed(2);
 
     let peakScore = -1, peakDay = d.time[0] ?? '';
     for (let i = 0; i < d.time.length; i++) {
-      const s = dengueScore(d.temperature_2m_max[i]??0, d.precipitation_sum[i]??0, d.relative_humidity_2m_mean[i]??0);
+      const s = dengueScore(d.temperature_2m_max[i] ?? 0, d.precipitation_sum[i] ?? 0, d.relative_humidity_2m_mean[i] ?? 0);
       if (s > peakScore) { peakScore = s; peakDay = d.time[i] ?? ''; }
     }
 
@@ -647,14 +828,17 @@ async function handleClimate(): Promise<unknown> {
       province: p.name, lat: p.lat, lng: p.lng,
       dengueRisk: dr, hfmdRisk: hr,
       dengueLevel: riskLevel(dr), hfmdLevel: riskLevel(hr),
+      airQualityRisk, airQualityLevel: riskLevel(airQualityRisk),
+      respiratoryRisk, respiratoryLevel: riskLevel(respiratoryRisk),
       tempMax: tMax, tempMin: tMin, rainfall: rain, humidity: hum,
+      pm25: undefined, pm10: undefined, ozone: undefined, nitrogenDioxide: undefined,
       forecastDays: d.time.length, peakRiskDay: peakDay,
     };
-  }));
+  });
 
   const forecasts = results
-    .filter((r): r is PromiseFulfilledResult<unknown> => r.status === 'fulfilled')
-    .map(r => r.value);
+    .filter(r => r.status === 'fulfilled')
+    .map(r => (r as PromiseFulfilledResult<unknown>).value);
 
   const payload = { forecasts, fetchedAt: Date.now() };
   setCached('climate', payload, 6 * 60 * 60_000);
@@ -678,7 +862,8 @@ export function devApiMiddleware(): Plugin {
           if (route === 'all') {
             // Bulk endpoint: outbreaks + stats + news in one call
             const [outbreaksPayload, newsPayload] = await Promise.all([handleOutbreaks(), handleNews()]);
-            const ob = (outbreaksPayload as { outbreaks: Array<{ disease: string; countryCode: string; alertLevel: string }> }).outbreaks;
+            const ob = (outbreaksPayload as { outbreaks: OutbreakItem[] }).outbreaks;
+            const newsItems = (newsPayload as { items?: Array<{ source?: string; publishedAt?: number }> }).items ?? [];
             const diseaseCount = new Map<string, number>();
             const countries = new Set<string>();
             let activeAlerts = 0;
@@ -689,15 +874,20 @@ export function devApiMiddleware(): Plugin {
             }
             data = {
               ...(outbreaksPayload as object),
-              stats: { totalOutbreaks: ob.length, activeAlerts, countriesAffected: countries.size,
+              stats: {
+                totalOutbreaks: ob.length, activeAlerts, countriesAffected: countries.size,
                 topDiseases: Array.from(diseaseCount.entries()).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([disease, count]) => ({ disease, count })),
-                lastUpdated: Date.now() },
+                lastUpdated: Date.now()
+              },
               news: newsPayload,
+              freshness: buildFreshness(ob, newsItems),
             };
           }
           else if (route === 'news') data = await handleNews();
           else if (route === 'outbreaks') data = await handleOutbreaks();
           else if (route === 'stats') data = await handleStats();
+          else if (route === 'source-health') data = await handleSourceHealth();
+          else if (route === 'timeseries') data = await handleTimeSeries(urlObj);
           else if (route === 'climate') data = await handleClimate();
           else return next();
 

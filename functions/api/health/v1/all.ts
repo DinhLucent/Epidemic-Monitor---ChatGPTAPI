@@ -22,6 +22,7 @@ import { fetchOutbreaksFromD1, type OutbreakItem } from '../../../_shared/outbre
 const CACHE_KEY = 'all-data';
 const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
 const NEWS_LIMIT = 50;
+const NEWS_SCAN_LIMIT = 150;
 
 interface NewsItem {
   id: string;
@@ -30,6 +31,13 @@ interface NewsItem {
   url: string;
   publishedAt: number;
   summary?: string;
+}
+
+interface DataFreshness {
+  apiFetchedAt: number;
+  pipelineUpdatedAt?: number;
+  latestArticlePublishedAt?: number;
+  sourceCount: number;
 }
 
 /** Compute stats from outbreak items (no extra D1 query needed). */
@@ -56,6 +64,42 @@ function computeStats(outbreaks: OutbreakItem[]) {
   };
 }
 
+function maxTimestamp(values: Array<number | undefined>): number | undefined {
+  const valid = values.filter((value): value is number => value !== undefined && Number.isFinite(value) && value > 0);
+  return valid.length > 0 ? Math.max(...valid) : undefined;
+}
+
+function computeFreshness(outbreaks: OutbreakItem[], newsItems: NewsItem[], apiFetchedAt: number): DataFreshness {
+  const sourceHosts = new Set<string>();
+  for (const outbreak of outbreaks) {
+    for (const label of outbreak.sourceLabels ?? []) sourceHosts.add(label);
+  }
+  for (const item of newsItems) {
+    if (item.source) sourceHosts.add(item.source);
+  }
+
+  return {
+    apiFetchedAt,
+    pipelineUpdatedAt: maxTimestamp(outbreaks.map((outbreak) => outbreak.pipelineUpdatedAt)),
+    latestArticlePublishedAt: maxTimestamp([
+      ...outbreaks.map((outbreak) => outbreak.latestArticlePublishedAt ?? outbreak.publishedAt),
+      ...newsItems.map((item) => item.publishedAt),
+    ]),
+    sourceCount: sourceHosts.size,
+  };
+}
+
+function canonicalUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    url.hash = '';
+    url.search = '';
+    return url.toString().replace(/\/$/, '').toLowerCase();
+  } catch {
+    return value.trim().toLowerCase();
+  }
+}
+
 /** Fetch news from D1 outbreak_items table.
  *  Only whitelisted web sources + VN-only (title-level guard). */
 async function fetchNews(db: D1Database): Promise<NewsItem[]> {
@@ -66,7 +110,7 @@ async function fetchNews(db: D1Database): Promise<NewsItem[]> {
     FROM outbreak_items
     WHERE url IS NOT NULL AND title IS NOT NULL
       AND source_type = 'web'
-      AND (country IS NULL OR LOWER(country) IN ('vietnam', 'viet nam', 'việt nam', 'vn'))
+      AND (LOWER(COALESCE(country, '')) IN ('vietnam', 'viet nam', 'việt nam', 'vn') OR province IS NOT NULL)
       AND LOWER(title) NOT GLOB '*bangladesh*'
       AND LOWER(title) NOT GLOB '*pakistan*'
       AND LOWER(title) NOT GLOB '*argentina*'
@@ -85,8 +129,9 @@ async function fetchNews(db: D1Database): Promise<NewsItem[]> {
       AND LOWER(title) NOT GLOB '*africa*'
     ORDER BY COALESCE(published_at, ingested_at) DESC
     LIMIT ?
-  `).bind(NEWS_LIMIT).all<{ id: string; title: string; source: string; url: string; published_at: number; summary: string | null }>();
+  `).bind(NEWS_SCAN_LIMIT).all<{ id: string; title: string; source: string; url: string; published_at: number; summary: string | null }>();
 
+  const seen = new Set<string>();
   return (result.results ?? []).map(r => ({
     id: String(r.id),
     title: String(r.title),
@@ -94,7 +139,12 @@ async function fetchNews(db: D1Database): Promise<NewsItem[]> {
     url: String(r.url),
     publishedAt: Number(r.published_at) || Date.now(),
     summary: r.summary ?? undefined,
-  }));
+  })).filter((item) => {
+    const key = canonicalUrl(item.url);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, NEWS_LIMIT);
 }
 
 export const onRequestGet: PagesFunction<Env> = async (context) => {
@@ -111,11 +161,13 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       fetchNews(context.env.DB),
     ]);
 
+    const fetchedAt = Date.now();
     const payload = {
       outbreaks,
       stats: computeStats(outbreaks),
       news: { items: newsItems, source: newsItems.length > 0 ? 'pipeline' : 'empty' },
-      fetchedAt: Date.now(),
+      fetchedAt,
+      freshness: computeFreshness(outbreaks, newsItems, fetchedAt),
       sources: outbreaks.length > 0 ? ['pipeline'] : [],
     };
 

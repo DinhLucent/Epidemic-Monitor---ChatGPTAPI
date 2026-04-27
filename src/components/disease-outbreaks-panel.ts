@@ -43,6 +43,29 @@ function localDay(ts: number): string {
   return `${y}-${m}-${day}`;
 }
 
+function evidenceMeta(item: DiseaseOutbreakItem): HTMLElement | null {
+  const parts = [
+    item.riskScore != null ? `điểm ${Math.round(item.riskScore)}` : null,
+    item.confidence != null ? `${Math.round(item.confidence * 100)}% tin cậy` : null,
+    item.sourceCount ? `${item.sourceCount} nguồn` : null,
+    item.officialConfirmed ? 'có nguồn chính thống' : null,
+    item.geoPrecision === 'district' ? 'đến huyện' : null,
+  ].filter(Boolean);
+  if (parts.length === 0) return null;
+
+  const detail = [
+    ...(item.riskFactors ?? []),
+    ...(item.extractionWarnings ?? []).map((warning) => `warning:${warning}`),
+  ].join(' · ');
+
+  return h('span', {
+    className: 'outbreak-quality-meta',
+    title: detail,
+  }, parts.join(' · '));
+}
+
+type PanelState = 'loading' | 'ready' | 'error';
+
 export class DiseaseOutbreaksPanel extends Panel {
   private _outbreaks: DiseaseOutbreakItem[] = [];
   private _escalations: Set<string> = new Set();
@@ -56,6 +79,9 @@ export class DiseaseOutbreaksPanel extends Panel {
   private _provinceChip: HTMLElement;
   private _searchInput: HTMLInputElement;
   private _listEl: HTMLElement;
+  private _state: PanelState = 'loading';
+  private _errorMessage = '';
+  private _retryAction: (() => void) | null = null;
 
   constructor() {
     super({ id: 'disease-outbreaks', title: 'Báo chí đưa tin', showCount: true, defaultRowSpan: 3 });
@@ -112,14 +138,42 @@ export class DiseaseOutbreaksPanel extends Panel {
 
   /** Called by app-init when fresh outbreak data arrives. */
   updateData(outbreaks: DiseaseOutbreakItem[]): void {
+    this._state = 'ready';
+    this._errorMessage = '';
+    this._retryAction = null;
     // Copy the array to prevent external mutation (e.g. dedup in processOutbreaks)
     // from changing our internal state behind our back.
     this._outbreaks = [...outbreaks];
     this.setCount(this._outbreaks.length);
+    this._syncControlsDisabled(false);
     // Reset expanded state so "Xem thêm" count stays consistent with new data
     this._showAllLocated = false;
     this._showAllUnlocated = false;
     // Re-mount toolbar + list (showLoading may have wiped content)
+    this._remount();
+    this._render();
+  }
+
+  /** Show an inline loading state without removing the panel toolbar. */
+  showLoadingState(): void {
+    this._state = 'loading';
+    this._errorMessage = '';
+    this._retryAction = null;
+    this.countEl.textContent = '...';
+    this.countEl.style.display = '';
+    this._syncControlsDisabled(true);
+    this._remount();
+    this._render();
+  }
+
+  /** Show a fetch failure state with an optional inline retry action. */
+  showFetchError(message: string, retry?: () => void): void {
+    this._state = 'error';
+    this._errorMessage = message;
+    this._retryAction = retry ?? null;
+    this.countEl.textContent = '!';
+    this.countEl.style.display = '';
+    this._syncControlsDisabled(true);
     this._remount();
     this._render();
   }
@@ -203,6 +257,48 @@ export class DiseaseOutbreaksPanel extends Panel {
     }
   }
 
+  private _syncControlsDisabled(disabled: boolean): void {
+    this._searchInput.disabled = disabled;
+    this._searchInput.setAttribute('aria-disabled', String(disabled));
+    for (const btn of Array.from(this._filterBar.querySelectorAll('.outbreak-filter-btn'))) {
+      (btn as HTMLButtonElement).disabled = disabled;
+      btn.setAttribute('aria-disabled', String(disabled));
+    }
+  }
+
+  private _hasActiveFilters(): boolean {
+    return this._filter !== null
+      || this._provinceFilter !== null
+      || this._dateFilter !== null
+      || this._search.length > 0;
+  }
+
+  private _buildStateCard(
+    kind: 'loading' | 'error' | 'empty',
+    title: string,
+    detail: string,
+    retry?: () => void,
+  ): HTMLElement {
+    const card = h('div', {
+      className: `outbreak-state-card outbreak-state-card--${kind}`,
+    });
+
+    if (kind === 'loading') {
+      card.appendChild(h('span', { className: 'panel-spinner outbreak-state-spinner' }));
+    }
+
+    card.appendChild(h('p', { className: 'outbreak-state-title' }, title));
+    card.appendChild(h('p', { className: 'outbreak-state-detail' }, detail));
+
+    if (retry) {
+      const btn = h('button', { className: 'panel-retry-btn' }, 'Thử lại');
+      btn.addEventListener('click', retry);
+      card.appendChild(btn);
+    }
+
+    return card;
+  }
+
   // ---------------------------------------------------------------------------
   // Private — rendering
   // ---------------------------------------------------------------------------
@@ -235,9 +331,39 @@ export class DiseaseOutbreaksPanel extends Panel {
     // Remove previous children
     while (this._listEl.firstChild) this._listEl.removeChild(this._listEl.firstChild);
 
+    if (this._state === 'loading') {
+      this._listEl.appendChild(this._buildStateCard(
+        'loading',
+        'Đang tải dữ liệu',
+        'Đang lấy danh sách bài báo và tín hiệu cảnh báo mới nhất từ API tổng hợp.',
+      ));
+      return;
+    }
+
+    if (this._state === 'error') {
+      this._listEl.appendChild(this._buildStateCard(
+        'error',
+        'Không tải được dữ liệu bùng phát',
+        this._errorMessage,
+        this._retryAction ?? undefined,
+      ));
+      return;
+    }
+
     if (!items.length) {
-      const empty = h('p', { className: 'outbreak-empty' }, 'No outbreaks match the current filters.');
-      this._listEl.appendChild(empty);
+      if (this._hasActiveFilters()) {
+        this._listEl.appendChild(this._buildStateCard(
+          'empty',
+          'Không có mục nào khớp bộ lọc hiện tại',
+          'Thử xóa bớt bộ lọc, đổi ngày, hoặc tìm với từ khóa khác.',
+        ));
+      } else {
+        this._listEl.appendChild(this._buildStateCard(
+          'empty',
+          'Chưa có dữ liệu để hiển thị',
+          'Nguồn dữ liệu có thể đang tạm trống hoặc lần đồng bộ gần nhất chưa hoàn tất.',
+        ));
+      }
       return;
     }
 
@@ -326,9 +452,15 @@ export class DiseaseOutbreaksPanel extends Panel {
 
     const isToday = localDay(item.publishedAt) === localDay(Date.now());
     const todayClass = isToday ? ' outbreak-row--today' : '';
-    const row = h('div', { className: `outbreak-row outbreak-row--${item.alertLevel}${todayClass}` },
+    const metaNode = evidenceMeta(item);
+    const rowChildren = [
       h('div', { className: 'outbreak-row-header' }, badge, title, ...(link ? [link] : [])),
       meta,
+    ];
+    if (metaNode) rowChildren.push(metaNode);
+
+    const row = h('div', { className: `outbreak-row outbreak-row--${item.alertLevel}${todayClass}` },
+      ...rowChildren,
     );
 
     row.addEventListener('click', (e) => {

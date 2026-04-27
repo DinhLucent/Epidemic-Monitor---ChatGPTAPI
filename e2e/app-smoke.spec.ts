@@ -116,11 +116,11 @@ test.describe('Epidemic Monitor — Smoke Tests', () => {
         const text = msg.text();
         // Only collect critical errors, not network-related ones
         if (!text.includes('fetch') &&
-            !text.includes('Failed to load') &&
-            !text.includes('net::') &&
-            !text.includes('404') &&
-            !text.includes('NetworkError') &&
-            !text.includes('CORS')) {
+          !text.includes('Failed to load') &&
+          !text.includes('net::') &&
+          !text.includes('404') &&
+          !text.includes('NetworkError') &&
+          !text.includes('CORS')) {
           errors.push(text);
         }
       }
@@ -162,66 +162,6 @@ test.describe('Epidemic Monitor — Smoke Tests', () => {
     const appElement = page.locator('#app');
     const innerHTML = await appElement.innerHTML();
     expect(innerHTML.length).toBeGreaterThan(0);
-  });
-
-  // =====================================================================
-  // AI Assistant ChatBox Tests — Added for chat-panel component
-  // =====================================================================
-
-  test('AI assistant panel renders with status', async ({ page }) => {
-    await page.goto('/');
-    await switchTab(page, 'Tools');
-    const panel = page.locator('.panel').filter({ hasText: /AI Assistant/i });
-    await expect(panel).toBeVisible({ timeout: 10000 });
-    // Should show provider status
-    const status = page.locator('.chat-status');
-    await expect(status).toBeVisible();
-    // Should have welcome message
-    await expect(page.locator('.chat-msg--assistant').first()).toBeVisible();
-  });
-
-  test('chat input and send button exist', async ({ page }) => {
-    await page.goto('/'); await switchTab(page, 'Tools');
-    await page.waitForTimeout(3000);
-    const input = page.locator('.chat-input');
-    await expect(input).toBeVisible();
-    const sendBtn = page.locator('.chat-send-btn');
-    await expect(sendBtn).toBeVisible();
-  });
-
-  test('can type in chat input', async ({ page }) => {
-    await page.goto('/'); await switchTab(page, 'Tools');
-    await page.waitForTimeout(3000);
-    const input = page.locator('.chat-input');
-    await input.fill('Test message');
-    await expect(input).toHaveValue('Test message');
-  });
-
-  test('send message creates user bubble and triggers LLM response', async ({ page }) => {
-    await page.goto('/'); await switchTab(page, 'Tools');
-    await page.waitForTimeout(6000); // Wait for LLM init
-
-    const input = page.locator('.chat-input');
-    await input.fill('Có bao nhiêu outbreak?');
-    await page.locator('.chat-send-btn').click();
-
-    // User message should appear
-    await expect(page.locator('.chat-msg--user')).toBeVisible({ timeout: 5000 });
-
-    // Wait for AI response (streaming from Ollama, may take up to 20s)
-    await expect(page.locator('.chat-msg--assistant').nth(1)).toBeVisible({ timeout: 25000 });
-
-    // Response should contain some text
-    const responseText = await page.locator('.chat-msg--assistant').last().textContent();
-    expect(responseText!.length).toBeGreaterThan(10);
-  });
-
-  test('chat status shows provider info', async ({ page }) => {
-    await page.goto('/'); await switchTab(page, 'Tools');
-    await page.waitForTimeout(6000);
-    const status = await page.locator('.chat-status').textContent();
-    // Should show either Ollama or "No LLM" - both are valid
-    expect(status!.length).toBeGreaterThan(3);
   });
 
   // =====================================================================
@@ -521,7 +461,7 @@ test.describe('Epidemic Monitor — Smoke Tests', () => {
     const btn = page.locator('.data-refresh-btn');
     await btn.click();
     // Should show "Refreshing..." briefly
-    await expect(age).toHaveText('Refreshing...', { timeout: 2000 }).catch(() => {});
+    await expect(age).toHaveText('Refreshing...', { timeout: 2000 }).catch(() => { });
     // Wait for refresh to complete
     await page.waitForTimeout(8000);
     // Age should reset (show small number)
@@ -591,21 +531,20 @@ test.describe('Epidemic Monitor — Smoke Tests', () => {
   });
 
   // =====================================================================
-  // All 10 panels render check
+  // All 8 panels render check
   // =====================================================================
 
-  test('all 10 panels render correctly', async ({ page }) => {
+  test('all 8 panels render correctly', async ({ page }) => {
     await page.goto('/');
     await page.waitForTimeout(6000);
     const titles = await page.locator('.panel-title').allTextContents();
-    expect(titles.length).toBe(10);
+    expect(titles.length).toBe(8);
     // Verify key panel names present
     const joined = titles.join(' ');
     expect(joined).toContain('Disease Outbreaks');
     expect(joined).toContain('Climate Risk');
     expect(joined).toContain('Epidemic Statistics');
     expect(joined).toContain('Health News');
-    expect(joined).toContain('AI Assistant');
     expect(joined).toContain('Signals');
     expect(joined).toContain('Deep Dive');
   });

@@ -27,7 +27,7 @@ const _visible: Record<LayerName, boolean> = {
   heatmap:       true,
   choropleth:    true,
   earlyWarnings: true,
-  districts:     true,
+  districts:     false,
 };
 
 /** Last known inputs — stored so toggleLayer() can rebuild without re-passing. */

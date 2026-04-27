@@ -92,8 +92,9 @@ function buildTable(
       h('th', { className: 'climate-th' }, 'Tỉnh / Thành'),
       h('th', { className: 'climate-th' }, 'SXH'),
       h('th', { className: 'climate-th' }, 'HFMD'),
+      h('th', { className: 'climate-th' }, 'Resp'),
       h('th', { className: 'climate-th' }, 'T°max'),
-      h('th', { className: 'climate-th' }, 'Mưa'),
+      h('th', { className: 'climate-th' }, 'PM2.5'),
     ),
   );
 
@@ -110,8 +111,9 @@ function buildTable(
       ),
       h('td', { className: 'climate-td' }, risklBadge(f.dengueLevel)),
       h('td', { className: 'climate-td' }, risklBadge(f.hfmdLevel)),
+      h('td', { className: 'climate-td' }, risklBadge(f.respiratoryLevel)),
       h('td', { className: 'climate-td' }, `${f.tempMax}°C`),
-      h('td', { className: 'climate-td' }, `${f.rainfall}mm`),
+      h('td', { className: 'climate-td' }, f.pm25 == null ? 'N/A' : String(f.pm25)),
     );
 
     row.addEventListener('click', () => onRowClick(f));

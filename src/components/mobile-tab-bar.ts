@@ -1,8 +1,8 @@
 /**
  * Mobile tab bar — bottom navigation shown only on small screens (<768px).
  *
- * Switches the app between three full-screen views: Map, Tin (outbreak list
- * + panels), and AI chat. Uses body class `mobile-mode` + `data-mobile-tab`
+ * Switches the app between two full-screen views: Map and Tin (outbreak list
+ * + panels). Uses body class `mobile-mode` + `data-mobile-tab`
  * attribute on `.app-shell` to drive CSS visibility overrides.
  *
  * The bar auto-hides on desktop via CSS media query, so it's safe to mount
@@ -11,7 +11,7 @@
  */
 import { h } from '@/utils/dom-utils';
 
-export type MobileTab = 'map' | 'list' | 'chat';
+export type MobileTab = 'map' | 'list';
 
 const STORAGE_KEY = 'em_mobile_tab_v1';
 const MOBILE_BREAKPOINT_PX = 768;
@@ -44,20 +44,15 @@ export function syncMobileModeClass(): void {
  *
  * @param shell  the `.app-shell` element whose `data-mobile-tab` drives
  *               view visibility via CSS
- * @param onChatOpen  called when the Chat tab becomes active — lets the app
- *                    show the chat overlay in fullscreen mode
- * @param onChatClose called when the Chat tab is deactivated
  */
 export function createMobileTabBar(
   shell: HTMLElement,
-  onChatOpen: () => void,
-  onChatClose: () => void,
 ): MobileTabBarHandles {
   // Restore last active tab — default to Map on first visit
   const initial: MobileTab = (() => {
     try {
       const saved = sessionStorage.getItem(STORAGE_KEY);
-      if (saved === 'map' || saved === 'list' || saved === 'chat') return saved;
+      if (saved === 'map' || saved === 'list') return saved;
     } catch { /* sessionStorage blocked */ }
     return 'map';
   })();
@@ -77,40 +72,32 @@ export function createMobileTabBar(
 
   const btnMap  = mkBtn('map',  '🗺️', 'Bản đồ');
   const btnList = mkBtn('list', '📰', 'Tin tức');
-  const btnChat = mkBtn('chat', '🤖', 'Trợ lý');
 
   const bar = h('nav', {
     className: 'mobile-tab-bar',
     role: 'tablist',
     'aria-label': 'Điều hướng ứng dụng',
-  }, btnMap, btnList, btnChat);
+  }, btnMap, btnList);
 
   const buttons: Record<MobileTab, HTMLElement> = {
     map:  btnMap,
     list: btnList,
-    chat: btnChat,
   };
 
   function setActive(next: MobileTab): void {
-    const prev = active;
     active = next;
 
-    for (const tab of ['map', 'list', 'chat'] as MobileTab[]) {
+    for (const tab of ['map', 'list'] as MobileTab[]) {
       buttons[tab].classList.toggle('mobile-tab-btn--active', tab === next);
     }
 
     applyTabState(shell, next);
 
     try { sessionStorage.setItem(STORAGE_KEY, next); } catch { /* ignore */ }
-
-    // Chat tab transitions drive the fullscreen chat overlay
-    if (next === 'chat' && prev !== 'chat') onChatOpen();
-    else if (prev === 'chat' && next !== 'chat') onChatClose();
   }
 
   btnMap.addEventListener('click', () => setActive('map'));
   btnList.addEventListener('click', () => setActive('list'));
-  btnChat.addEventListener('click', () => setActive('chat'));
 
   // Apply initial state
   applyTabState(shell, initial);

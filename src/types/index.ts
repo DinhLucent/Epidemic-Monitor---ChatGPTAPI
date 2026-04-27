@@ -20,6 +20,28 @@ export interface DiseaseOutbreakItem {
   district?: string;
   /** Data source name (e.g. VnExpress, WHO-DON) */
   source?: string;
+  /** Number of distinct source hosts backing this grouped outbreak item. */
+  sourceCount?: number;
+  /** Short source labels used for evidence/debug display. */
+  sourceLabels?: string[];
+  /** True when at least one backing source is official or source-of-record. */
+  officialConfirmed?: boolean;
+  /** 0-100 evidence score derived from sources, recency, case rate, and location precision. */
+  riskScore?: number;
+  /** 0-1 confidence score for the extracted structured item. */
+  confidence?: number;
+  riskFactors?: string[];
+  extractionWarnings?: string[];
+  geoPrecision?: 'district' | 'province' | 'unknown';
+  latestArticlePublishedAt?: number;
+  pipelineUpdatedAt?: number;
+}
+
+export interface DataFreshness {
+  apiFetchedAt: number;
+  pipelineUpdatedAt?: number;
+  latestArticlePublishedAt?: number;
+  sourceCount: number;
 }
 
 export interface NewsItem {

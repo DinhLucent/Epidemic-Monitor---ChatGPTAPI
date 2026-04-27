@@ -16,25 +16,35 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "lint": "biome lint ./src",
+    "eval:local-llm": "node scripts/eval-local-llm.mjs",
+    "eval:chatgpt2api": "node scripts/eval-chatgpt2api-extraction.mjs",
+    "eval:chatgpt2api:provinces": "node scripts/eval-chatgpt2api-province-coverage.mjs",
     "test:e2e": "playwright test",
     "dev:pages": "npm run build && npx wrangler pages dev dist",
     "deploy": "npm run build && npx wrangler pages deploy dist --project-name=epidemic-monitor",
-    "deploy:prod": "npm run build && npx wrangler pages deploy dist --project-name=epidemic-monitor --branch=main"
+    "deploy:prod": "npm run build && npx wrangler pages deploy dist --project-name=epidemic-monitor --branch=main",
+    "shield:bootstrap": "powershell -ExecutionPolicy Bypass -File scripts/shield.ps1 bootstrap",
+    "shield:compile": "powershell -ExecutionPolicy Bypass -File scripts/shield.ps1 compile",
+    "shield:plan:runtime": "powershell -ExecutionPolicy Bypass -File scripts/shield.ps1 plan tasks/architecture/TASK-ARCH-001-runtime-architecture.yaml",
+    "shield:plan:boundary": "powershell -ExecutionPolicy Bypass -File scripts/shield.ps1 plan tasks/architecture/TASK-ARCH-002-shield-runtime-boundary.yaml",
+    "shield:plan:free-session": "powershell -ExecutionPolicy Bypass -File scripts/shield.ps1 plan tasks/architecture/TASK-ARCH-003-free-session-ingestion-evaluation.yaml"
   },
   "dependencies": {
+    "@chatgpt-to-sdk/core": "file:../ChatGPTtoSDK/packages/core",
+    "@chatgpt-to-sdk/provider-openai-compatible": "file:../ChatGPTtoSDK/packages/providers/openai-compatible",
+    "@chatgpt-to-sdk/sdk-ts": "file:../ChatGPTtoSDK/packages/sdk-ts",
+    "@chatgpt-to-sdk/session-sqlite": "file:../ChatGPTtoSDK/packages/session-sqlite",
     "@deck.gl/core": "^9.1.0",
     "@deck.gl/geo-layers": "^9.1.0",
     "@deck.gl/layers": "^9.1.0",
     "@deck.gl/mapbox": "^9.1.0",
     "deck.gl": "^9.1.0",
-    "dompurify": "^3.2.0",
     "maplibre-gl": "^4.7.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.0.0",
     "@cloudflare/workers-types": "^4.20260405.1",
     "@playwright/test": "^1.59.1",
-    "@types/dompurify": "^3.0.5",
     "typescript": "^5.7.0",
     "vite": "^6.0.0",
     "wrangler": "^4.80.0"

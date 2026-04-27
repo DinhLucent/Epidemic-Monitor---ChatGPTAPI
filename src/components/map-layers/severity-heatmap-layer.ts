@@ -6,6 +6,7 @@
 
 import { HeatmapLayer } from '@deck.gl/aggregation-layers';
 import type { DiseaseOutbreakItem, AlertLevel } from '@/types';
+import { isInsideVietnamMapBounds } from './vietnam-map-scope';
 
 const WEIGHT_MAP: Record<AlertLevel, number> = {
   alert:   3,
@@ -29,7 +30,7 @@ const COLOR_RANGE: [number, number, number][] = [
 export function createSeverityHeatmapLayer(
   outbreaks: DiseaseOutbreakItem[],
 ): HeatmapLayer<DiseaseOutbreakItem> {
-  const data = outbreaks.filter(o => o.lat != null && o.lng != null);
+  const data = outbreaks.filter(o => isInsideVietnamMapBounds(o.lat, o.lng));
 
   return new HeatmapLayer<DiseaseOutbreakItem>({
     id: 'severity-heatmap',

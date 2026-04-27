@@ -6,11 +6,19 @@
 import '@/styles/breaking-news.css';
 
 const AUTO_DISMISS_MS = 30_000;
+const DISMISS_TTL_MS = 6 * 60 * 60 * 1000;
+const STORAGE_KEY = 'epidemic-monitor.dismissedBreakingNews';
+
+interface DismissedAlert {
+  key: string;
+  expiresAt: number;
+}
 
 export class BreakingNewsBanner {
   private _el: HTMLElement;
   private _textEl: HTMLSpanElement;
   private _dismissTimer: ReturnType<typeof setTimeout> | null = null;
+  private _activeKey: string | null = null;
 
   constructor() {
     // Icon span
@@ -34,13 +42,13 @@ export class BreakingNewsBanner {
     dismissBtn.textContent = '✕';
     dismissBtn.title = 'Đóng thông báo';
     dismissBtn.setAttribute('aria-label', 'Dismiss alert');
-    dismissBtn.addEventListener('click', () => this.dismiss());
+    dismissBtn.addEventListener('click', () => this.dismiss(true));
 
     // Root banner element — hidden by default via CSS transform
     this._el = document.createElement('div');
     this._el.className = 'breaking-news-banner';
-    this._el.setAttribute('role', 'alert');
-    this._el.setAttribute('aria-live', 'assertive');
+    this._el.setAttribute('role', 'status');
+    this._el.setAttribute('aria-live', 'polite');
     this._el.appendChild(icon);
     this._el.appendChild(label);
     this._el.appendChild(this._textEl);
@@ -56,9 +64,13 @@ export class BreakingNewsBanner {
    * @param message - Alert text to display
    * @param level   - 'alert' (red) or 'warning' (orange)
    */
-  show(message: string, level: 'alert' | 'warning' = 'alert'): void {
+  show(message: string, level: 'alert' | 'warning' = 'alert', key = message): void {
+    if (this._isDismissed(key)) return;
+    if (this._activeKey === key && this._el.classList.contains('breaking-news-banner--visible')) return;
+
     // Clear any existing auto-dismiss timer
     this._clearTimer();
+    this._activeKey = key;
 
     // Update level modifier classes
     this._el.classList.remove('breaking-news-banner--alert', 'breaking-news-banner--warning');
@@ -71,11 +83,12 @@ export class BreakingNewsBanner {
     this._el.classList.add('breaking-news-banner--visible');
 
     // Auto-dismiss after 30 seconds
-    this._dismissTimer = setTimeout(() => this.dismiss(), AUTO_DISMISS_MS);
+    this._dismissTimer = setTimeout(() => this.dismiss(true), AUTO_DISMISS_MS);
   }
 
   /** Hide the banner and clear the auto-dismiss timer. */
-  dismiss(): void {
+  dismiss(persist = false): void {
+    if (persist && this._activeKey) this._rememberDismissed(this._activeKey);
     this._clearTimer();
     this._el.classList.remove('breaking-news-banner--visible');
   }
@@ -90,6 +103,35 @@ export class BreakingNewsBanner {
     if (this._dismissTimer !== null) {
       clearTimeout(this._dismissTimer);
       this._dismissTimer = null;
+    }
+  }
+
+  private _isDismissed(key: string): boolean {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return false;
+      const records = JSON.parse(raw) as DismissedAlert[];
+      const now = Date.now();
+      const fresh = records.filter((record) => record.expiresAt > now);
+      if (fresh.length !== records.length) {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
+      }
+      return fresh.some((record) => record.key === key);
+    } catch {
+      return false;
+    }
+  }
+
+  private _rememberDismissed(key: string): void {
+    try {
+      const now = Date.now();
+      const raw = localStorage.getItem(STORAGE_KEY);
+      const records = raw ? JSON.parse(raw) as DismissedAlert[] : [];
+      const fresh = records.filter((record) => record.expiresAt > now && record.key !== key);
+      fresh.push({ key, expiresAt: now + DISMISS_TTL_MS });
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh.slice(-20)));
+    } catch {
+      // localStorage may be unavailable in privacy modes.
     }
   }
 }

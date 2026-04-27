@@ -6,6 +6,7 @@
 
 import { ScatterplotLayer } from '@deck.gl/layers';
 import type { DiseaseOutbreakItem, AlertLevel } from '@/types';
+import { isInsideVietnamMapBounds } from './vietnam-map-scope';
 
 /** Fully opaque colors for light basemap visibility */
 const ALERT_COLORS: Record<AlertLevel, [number, number, number, number]> = {
@@ -45,7 +46,7 @@ export function createOutbreakMarkersLayer(
 ): ScatterplotLayer<DiseaseOutbreakItem> {
   // Exclude "Toàn quốc" / unlocated items — they have no meaningful map position
   const data = outbreaks.filter(o =>
-    o.lat != null && o.lng != null &&
+    isInsideVietnamMapBounds(o.lat, o.lng) &&
     o.province !== 'Toàn quốc' && o.province !== 'phía Nam' && o.province !== 'ĐBSCL'
   );
 

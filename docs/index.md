@@ -41,7 +41,7 @@ Epidemic Monitor đọc giùm bạn. Mỗi 6 giờ, hệ thống quét các báo
 - 🗺 **Bản đồ cảnh báo nguy cơ sức khoẻ** với marker theo tỉnh/huyện cho từng tin báo chí đưa
 - 📰 **Danh sách tin** mới nhất từ các báo lớn (VnExpress, Tuổi Trẻ, Thanh Niên, Dân Trí, Sức khỏe Đời sống…) + các báo địa phương + HCDC
 - 📊 **Bệnh được nhắc nhiều** — top diseases theo số tin báo chí đưa
-- 🤖 **Trợ lý AI** để hỏi cụ thể: *"Hà Nội tuần này có tin gì?"*, *"Tay chân miệng được báo chí đưa ở những tỉnh nào?"*
+- 🤖 **AI trong pipeline** để lọc bài, trích xuất dữ liệu có cấu trúc, và chỉ giữ tin dịch liên quan tới Việt Nam
 
 Tất cả miễn phí, mở public, không cần đăng ký, không quảng cáo, không tracking.
 

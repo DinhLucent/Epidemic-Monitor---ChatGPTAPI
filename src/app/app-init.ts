@@ -24,19 +24,17 @@ import { fetchDiseaseOutbreaks } from '@/services/disease-outbreak-service';
 import { fetchHealthNews } from '@/services/news-feed-service';
 import { invalidateCache } from '@/services/fetch-cache';
 import { fetchBulkData, invalidateBulkCache } from '@/services/bulk-data-service';
-import { ChatPanel } from '@/components/chat-panel';
 import { ClimateAlertsPanel } from '@/components/climate-alerts-panel';
+import { RegionalSignalsPanel } from '@/components/regional-signals-panel';
 import { diseaseLabel } from '@/components/case-report-panel-data';
-import { initLLM, chat } from '@/services/llm-router';
-import { buildMessages } from '@/services/llm-context-builder';
-import { processOutbreaks, processNews, setLLMComplete } from '@/services/llm-data-pipeline';
-import { complete } from '@/services/llm-router';
 import { fetchClimateForecasts } from '@/services/climate-service';
+import type { ClimateForecast } from '@/services/climate-service';
+import { canonicalProvinceName } from '@/services/province-normalizer';
 import { initSnapshotDB, saveSnapshot, getRecentSnapshots, pruneOldSnapshots } from '@/services/snapshot-store';
 import { detectEscalations, detectEarlyWarnings } from '@/services/trend-calculator';
-import { setEarlyWarnings, setDistrictGeoJson, setHighlightedProvince, setSelectedDate } from '@/components/map-layers/index';
+import { setEarlyWarnings, setHighlightedProvince, setSelectedDate } from '@/components/map-layers/index';
 import { BreakingNewsBanner } from '@/components/breaking-news-banner';
-import type { DiseaseOutbreakItem, EpidemicStats, NewsItem } from '@/types';
+import type { DataFreshness, DiseaseOutbreakItem, EpidemicStats, NewsItem } from '@/types';
 
 export async function initApp(): Promise<void> {
   try {
@@ -90,19 +88,19 @@ export async function initApp(): Promise<void> {
         }, '📄 Điều khoản'),
         h('a', {
           className: 'app-header-disclaimer-report',
-          href: 'mailto:phucnt0@gmail.com?subject=[Epidemic%20Monitor]%20Takedown%20request',
-        }, '✉ Báo lỗi'),
+          href: 'https://github.com/DinhLucent/my-epidemic-monitor/issues',
+          target: '_blank',
+          rel: 'noopener noreferrer',
+        }, '🐛 Báo lỗi'),
       ),
     );
 
-    const headerAuthor = h('div', { className: 'app-header-author', title: 'Phúc Nguyễn — creator' },
-      h('div', { className: 'app-header-author-avatar' }, 'PN'),
+    const headerAuthor = h('div', { className: 'app-header-author', title: 'DinhLucent — GitHub' },
+      h('div', { className: 'app-header-author-avatar' }, 'DL'),
       h('div', { className: 'app-header-author-info' },
-        h('span', { className: 'app-header-author-name' }, 'Phúc Nguyễn'),
+        h('span', { className: 'app-header-author-name' }, 'DinhLucent'),
         h('div', { className: 'app-header-author-links' },
-          h('a', { href: 'https://github.com/phuc-nt', target: '_blank', rel: 'noopener noreferrer', title: 'GitHub' }, 'GH'),
-          h('a', { href: 'https://www.linkedin.com/in/nguyen-trong-phuc', target: '_blank', rel: 'noopener noreferrer', title: 'LinkedIn' }, 'in'),
-          h('a', { href: 'https://phucnt.substack.com', target: '_blank', rel: 'noopener noreferrer', title: 'Substack' }, 'SS'),
+          h('a', { href: 'https://github.com/DinhLucent', target: '_blank', rel: 'noopener noreferrer', title: 'GitHub' }, 'GH'),
         ),
       ),
     );
@@ -115,16 +113,16 @@ export async function initApp(): Promise<void> {
     const mapShell = new MapShell('map');
     ctx.map = mapShell;
 
-    // 3. Instantiate panels (single view — chat is floating, stats/trend removed)
-    const outbreaksPanel    = new DiseaseOutbreaksPanel();
-    const topDiseasesPanel  = new TopDiseasesPanel();
-    const chatPanel         = new ChatPanel();
-    const climatePanel      = new ClimateAlertsPanel();
-    const banner            = new BreakingNewsBanner();
+    // 3. Instantiate panels
+    const outbreaksPanel = new DiseaseOutbreaksPanel();
+    const topDiseasesPanel = new TopDiseasesPanel();
+    const climatePanel = new ClimateAlertsPanel();
+    const regionalSignalsPanel = new RegionalSignalsPanel();
+    const banner = new BreakingNewsBanner();
 
     // 4. Flat panel list — climate forecast panel hidden (kept off for now,
     //    still computed for early-warning markers on the map).
-    const panels: HTMLElement[] = [outbreaksPanel.el, topDiseasesPanel.el];
+    const panels: HTMLElement[] = [outbreaksPanel.el, topDiseasesPanel.el, regionalSignalsPanel.el];
 
     // Alert summary strip — shows counts per severity level
     const summaryStrip = h('div', { className: 'alert-summary-strip' });
@@ -163,7 +161,7 @@ export async function initApp(): Promise<void> {
     for (const day of timelineDays) {
       const d = new Date(day + 'T00:00:00');
       const isToday = day === todayStr;
-      const dowLabel  = isToday ? 'HN' : DOW_VN[d.getDay()];
+      const dowLabel = isToday ? 'HN' : DOW_VN[d.getDay()];
       const dateLabel = isToday ? 'Hôm nay' : `${d.getDate()}/${d.getMonth() + 1}`;
       const btn = h('button', {
         className: `timeline-day-btn${isToday ? ' timeline-day-btn--active' : ''}`,
@@ -202,9 +200,9 @@ export async function initApp(): Promise<void> {
       const items = date
         ? allOutbreaks.filter(o => localDateString(new Date(o.publishedAt)) === date)
         : allOutbreaks;
-      const alertCnt   = items.filter(o => o.alertLevel === 'alert').length;
-      const warnCnt    = items.filter(o => o.alertLevel === 'warning').length;
-      const watchCnt   = items.filter(o => o.alertLevel === 'watch').length;
+      const alertCnt = items.filter(o => o.alertLevel === 'alert').length;
+      const warnCnt = items.filter(o => o.alertLevel === 'warning').length;
+      const watchCnt = items.filter(o => o.alertLevel === 'watch').length;
 
       summaryStrip.textContent = '';
       const pill = (count: number, label: string, cls: string) =>
@@ -214,9 +212,9 @@ export async function initApp(): Promise<void> {
         );
       // Legal-safe pill labels: describe media coverage volume, not an
       // epidemiological severity judgment. "Nhiều tin" ≠ "ca tử vong cao".
-      summaryStrip.appendChild(pill(alertCnt, 'Nhiều tin',  'summary-pill--alert'));
-      summaryStrip.appendChild(pill(warnCnt,  'Vài tin',    'summary-pill--warning'));
-      summaryStrip.appendChild(pill(watchCnt, 'Ít tin',     'summary-pill--watch'));
+      summaryStrip.appendChild(pill(alertCnt, 'Nhiều tin', 'summary-pill--alert'));
+      summaryStrip.appendChild(pill(warnCnt, 'Vài tin', 'summary-pill--warning'));
+      summaryStrip.appendChild(pill(watchCnt, 'Ít tin', 'summary-pill--watch'));
       summaryStrip.appendChild(
         h('div', { className: 'summary-total' }, `${items.length} tin gần đây`),
       );
@@ -225,34 +223,8 @@ export async function initApp(): Promise<void> {
     // Mount all panels (single flat view)
     for (const el of panels) panelsGrid.appendChild(el);
 
-    // Mount chat widget.
-    // Desktop: floating chat bubble FAB + collapsible overlay (bottom-right).
-    // Mobile: chat lives as a full-screen "tab" driven by the bottom tab bar;
-    // the FAB is hidden via CSS under `.mobile-mode`.
-    const chatOverlay = h('div', { className: 'chat-overlay' }, chatPanel.el);
-    const chatFab = h('button', {
-      className: 'chat-fab',
-      title: 'Trợ lý AI — Hỏi đáp về dữ liệu sức khoẻ cộng đồng',
-    }, '💬');
-    let chatOpen = false;
-    const setChatOpen = (open: boolean): void => {
-      chatOpen = open;
-      chatOverlay.classList.toggle('chat-overlay--open', open);
-      chatFab.classList.toggle('chat-fab--open', open);
-      chatFab.textContent = open ? '✕' : '💬';
-    };
-    chatFab.addEventListener('click', () => setChatOpen(!chatOpen));
-    document.body.appendChild(chatOverlay);
-    document.body.appendChild(chatFab);
-
     // Mount mobile tab bar. Always present; CSS hides it on desktop.
-    // On mobile, the Chat tab reuses the existing chat overlay in a
-    // fullscreen variant driven by `body.mobile-mode[data-mobile-tab="chat"]`.
-    const mobileTabs = createMobileTabBar(
-      appShell,
-      () => setChatOpen(true),
-      () => setChatOpen(false),
-    );
+    const mobileTabs = createMobileTabBar(appShell);
     document.body.appendChild(mobileTabs.el);
 
     // When any tab is activated we ask MapLibre to recompute canvas size
@@ -265,25 +237,18 @@ export async function initApp(): Promise<void> {
     });
     observer.observe(appShell, { attributes: true, attributeFilter: ['data-mobile-tab'] });
 
-    // React to viewport resize — toggle mobile mode class, and when leaving
-    // mobile we reset chat state to avoid the overlay staying stuck open.
+    // React to viewport resize — toggle mobile mode class.
     window.addEventListener('resize', () => {
-      const wasMobile = document.body.classList.contains('mobile-mode');
       syncMobileModeClass();
-      const nowMobile = isMobileViewport();
-      if (wasMobile && !nowMobile) {
-        // Collapse chat when user drags from mobile → desktop width
-        setChatOpen(false);
-      }
     });
 
     // (Footer author card moved to global header)
 
     // 5. Store panel refs in context
-    ctx.panels.set(outbreaksPanel.id,   outbreaksPanel);
-    ctx.panels.set(climatePanel.id,     climatePanel);
+    ctx.panels.set(outbreaksPanel.id, outbreaksPanel);
+    ctx.panels.set(climatePanel.id, climatePanel);
     ctx.panels.set(topDiseasesPanel.id, topDiseasesPanel);
-    ctx.panels.set(chatPanel.id,        chatPanel);
+    ctx.panels.set(regionalSignalsPanel.id, regionalSignalsPanel);
 
     // 6. Map layer controls removed — all layers always on with their
     //    default visibility. Keeps the map uncluttered and mobile-friendly.
@@ -311,7 +276,7 @@ export async function initApp(): Promise<void> {
           mapShell.flyTo([item.lng, item.lat], 8);
         }
         mapShell.resize();
-        const cx = mapContainer.clientWidth  / 2;
+        const cx = mapContainer.clientWidth / 2;
         const cy = mapContainer.clientHeight / 2;
         popup.show(item, cx, cy);
       };
@@ -327,23 +292,74 @@ export async function initApp(): Promise<void> {
     });
 
     // 10. Data fetch + refresh logic
+    const AUTO_REFRESH_MS = 10 * 60 * 1000;
+    const DATA_AGE_REFRESH_MS = 30_000;
     let lastFetchTime = 0;
+    let currentFreshness: DataFreshness | null = null;
+    let latestClimateForecasts: ClimateForecast[] = [];
+
+    function maxTimestamp(values: Array<number | undefined>): number | undefined {
+      const valid = values.filter((value): value is number => value !== undefined && Number.isFinite(value) && value > 0);
+      return valid.length > 0 ? Math.max(...valid) : undefined;
+    }
+
+    function deriveFreshness(
+      currentOutbreaks: DiseaseOutbreakItem[],
+      currentNews: NewsItem[],
+      apiFetchedAt: number,
+    ): DataFreshness {
+      const sources = new Set<string>();
+      for (const outbreak of currentOutbreaks) {
+        for (const label of outbreak.sourceLabels ?? []) sources.add(label);
+        if (outbreak.source) sources.add(outbreak.source);
+      }
+      for (const item of currentNews) {
+        if (item.source) sources.add(item.source);
+      }
+
+      return {
+        apiFetchedAt,
+        pipelineUpdatedAt: maxTimestamp(currentOutbreaks.map((outbreak) => outbreak.pipelineUpdatedAt)),
+        latestArticlePublishedAt: maxTimestamp([
+          ...currentOutbreaks.map((outbreak) => outbreak.latestArticlePublishedAt ?? outbreak.publishedAt),
+          ...currentNews.map((item) => item.publishedAt),
+        ]),
+        sourceCount: sources.size,
+      };
+    }
+
+    function formatAge(ts: number): string {
+      const secs = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+      if (secs < 60) return `${secs}s ago`;
+      if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+      if (secs < 86_400) return `${Math.floor(secs / 3600)}h ago`;
+      return `${Math.floor(secs / 86_400)}d ago`;
+    }
 
     function updateDataAge(): void {
       if (!lastFetchTime) { dataAge.textContent = 'Loading...'; return; }
-      const secs = Math.floor((Date.now() - lastFetchTime) / 1000);
-      if (secs < 60) dataAge.textContent = `Updated ${secs}s ago`;
-      else if (secs < 3600) dataAge.textContent = `Updated ${Math.floor(secs / 60)}m ago`;
-      else dataAge.textContent = `Updated ${Math.floor(secs / 3600)}h ago`;
+      const dataTimestamp = currentFreshness?.pipelineUpdatedAt ?? currentFreshness?.latestArticlePublishedAt;
+      dataAge.textContent = dataTimestamp ? `Data ${formatAge(dataTimestamp)}` : `Updated ${formatAge(lastFetchTime)}`;
+      dataAge.title = [
+        `UI fetched ${formatAge(lastFetchTime)}`,
+        currentFreshness?.pipelineUpdatedAt
+          ? `pipeline updated ${new Date(currentFreshness.pipelineUpdatedAt).toLocaleString('vi-VN')}`
+          : null,
+        currentFreshness?.latestArticlePublishedAt
+          ? `latest article ${new Date(currentFreshness.latestArticlePublishedAt).toLocaleString('vi-VN')}`
+          : null,
+        currentFreshness?.sourceCount ? `${currentFreshness.sourceCount} sources` : null,
+      ].filter(Boolean).join(' | ');
     }
 
-    async function fetchAllData(): Promise<{ outbreaks: DiseaseOutbreakItem[]; stats: EpidemicStats; news: NewsItem[] }> {
+    async function fetchAllData(): Promise<{ outbreaks: DiseaseOutbreakItem[]; stats: EpidemicStats; news: NewsItem[]; freshness: DataFreshness }> {
       invalidateBulkCache();
 
       try {
         // Single API call: outbreaks + stats + news in one request (saves ~67% function invocations)
         const bulk = await fetchBulkData();
         lastFetchTime = Date.now();
+        currentFreshness = bulk.freshness;
         updateDataAge();
         return bulk;
       } catch {
@@ -351,11 +367,19 @@ export async function initApp(): Promise<void> {
         invalidateCache('disease-outbreaks');
         invalidateCache('health-news');
 
-        const [outbreaks, news] = await Promise.all([
-          fetchDiseaseOutbreaks(),
-          fetchHealthNews(),
+        const [outbreaksResult, newsResult] = await Promise.allSettled([
+          fetchDiseaseOutbreaks({ graceful: false }),
+          fetchHealthNews({ graceful: false }),
         ]);
+
+        if (outbreaksResult.status === 'rejected') {
+          throw outbreaksResult.reason;
+        }
+
+        const outbreaks = outbreaksResult.value;
+        const news = newsResult.status === 'fulfilled' ? newsResult.value : [];
         lastFetchTime = Date.now();
+        currentFreshness = deriveFreshness(outbreaks, news, lastFetchTime);
         updateDataAge();
         // Derive minimal stats placeholder (UI no longer displays server stats)
         const stats: EpidemicStats = {
@@ -365,16 +389,19 @@ export async function initApp(): Promise<void> {
           topDiseases: [],
           lastUpdated: Date.now(),
         };
-        return { outbreaks, stats, news };
+        return { outbreaks, stats, news, freshness: currentFreshness };
       }
     }
 
-    function applyData(outbreaks: DiseaseOutbreakItem[], _stats: EpidemicStats, news: NewsItem[]): void {
+    function applyData(outbreaks: DiseaseOutbreakItem[], _stats: EpidemicStats, news: NewsItem[], freshness: DataFreshness): void {
       ctx.outbreaks = outbreaks;
       ctx.news = news;
+      currentFreshness = freshness;
+      updateDataAge();
 
       outbreaksPanel.updateData(outbreaks);
       topDiseasesPanel.updateData(outbreaks);
+      regionalSignalsPanel.updateData(outbreaks, latestClimateForecasts);
 
       // Update timeline count badges + summary strip with latest data
       updateTimelineCounts(outbreaks);
@@ -385,64 +412,107 @@ export async function initApp(): Promise<void> {
       if (alertOutbreaks.length > 0) {
         const top = alertOutbreaks[0];
         const totalCases = alertOutbreaks.reduce((s, o) => s + (o.cases ?? 0), 0);
+        const latestAlertAt = Math.max(...alertOutbreaks.map(o => o.latestArticlePublishedAt ?? o.publishedAt ?? 0));
+        const alertKey = [
+          'alert',
+          top.disease,
+          canonicalProvinceName(top.province ?? ''),
+          latestAlertAt,
+          alertOutbreaks.length,
+        ].join(':');
         banner.show(
           `${diseaseLabel(top.disease)}: ${alertOutbreaks.length} tin báo chí đang đưa, khoảng ${totalCases.toLocaleString('vi-VN')} ca được đề cập`,
           'alert',
+          alertKey,
         );
+      } else {
+        banner.dismiss(false);
       }
     }
 
     // Initial fetch
-    outbreaksPanel.showLoading();
+    outbreaksPanel.showLoadingState();
     topDiseasesPanel.showLoading();
 
     let outbreaks: DiseaseOutbreakItem[];
     let stats: EpidemicStats;
     let news: NewsItem[];
+    let freshness: DataFreshness;
+    let initialOutbreakLoadFailed = false;
 
     try {
-      ({ outbreaks, stats, news } = await fetchAllData());
+      ({ outbreaks, stats, news, freshness } = await fetchAllData());
       console.info(`[EpidemicMonitor] Live data — ${outbreaks.length} outbreaks, ${news.length} news`);
     } catch (err) {
       console.error('[EpidemicMonitor] Data fetch failed:', err);
+      initialOutbreakLoadFailed = true;
+      dataAge.textContent = 'Data unavailable';
       outbreaks = [];
       stats = { totalOutbreaks: 0, activeAlerts: 0, countriesAffected: 0, topDiseases: [], lastUpdated: 0 };
       news = [];
+      freshness = { apiFetchedAt: Date.now(), sourceCount: 0 };
     }
-    applyData(outbreaks, stats, news);
+    applyData(outbreaks, stats, news, freshness);
 
     // Shared refresh logic — saves snapshot for timeline accumulation
     async function refreshData(silent = false): Promise<void> {
       const fresh = await fetchAllData();
-      applyData(fresh.outbreaks, fresh.stats, fresh.news);
-      // Re-run LLM pipeline on copies to avoid mutating panel-held arrays
-      void processOutbreaks([...fresh.outbreaks]);
-      void processNews([...fresh.news]);
+      applyData(fresh.outbreaks, fresh.stats, fresh.news, fresh.freshness);
       // Accumulate snapshot for historical timeline
       void saveSnapshot(fresh.outbreaks);
       if (!silent) console.info(`[EpidemicMonitor] Refreshed — ${fresh.outbreaks.length} outbreaks, ${fresh.news.length} news`);
     }
 
+    function showOutbreakFetchError(): void {
+      outbreaksPanel.showFetchError(
+        'Không thể tải danh sách bài báo và cảnh báo mới nhất lúc này. Thử tải lại từ panel này hoặc nút refresh ở thanh trên.',
+        () => { void retryOutbreakFetch(); },
+      );
+    }
+
+    async function retryOutbreakFetch(): Promise<void> {
+      outbreaksPanel.showLoadingState();
+      dataAge.textContent = 'Refreshing...';
+      try {
+        await refreshData();
+      } catch (err) {
+        console.error('[EpidemicMonitor] Retry failed:', err);
+        dataAge.textContent = 'Data unavailable';
+        showOutbreakFetchError();
+      }
+    }
+
+    if (initialOutbreakLoadFailed) {
+      showOutbreakFetchError();
+    }
+
     // Refresh button handler
     refreshBtn.addEventListener('click', async () => {
+      const shouldShowInlineLoading = ctx.outbreaks.length === 0;
+      if (shouldShowInlineLoading) outbreaksPanel.showLoadingState();
       refreshBtn.classList.add('refreshing');
       dataAge.textContent = 'Refreshing...';
       try {
         await refreshData();
       } catch (err) {
         console.error('[EpidemicMonitor] Refresh failed:', err);
-        dataAge.textContent = 'Refresh failed';
+        if (shouldShowInlineLoading) {
+          dataAge.textContent = 'Data unavailable';
+          showOutbreakFetchError();
+        } else {
+          dataAge.textContent = 'Refresh failed';
+        }
       }
       refreshBtn.classList.remove('refreshing');
     });
 
-    // Auto-refresh every 5 minutes — accumulates snapshots for timeline
+    // Auto-refresh aligned with backend cache TTL; snapshots feed the local timeline.
     setInterval(async () => {
       try { await refreshData(true); } catch { /* Silent retry next interval */ }
-    }, 5 * 60 * 1000);
+    }, AUTO_REFRESH_MS);
 
     // Update age indicator every 30 seconds
-    setInterval(updateDataAge, 30_000);
+    setInterval(updateDataAge, DATA_AGE_REFRESH_MS);
 
     // Snapshot store: save current data + detect escalations (watch→warning→alert)
     try {
@@ -463,7 +533,7 @@ export async function initApp(): Promise<void> {
     const riskWeight: Record<string, number> = { alert: 1, warning: 0.6, watch: 0.3 };
     const riskScores = new Map<string, number>();
     for (const o of outbreaks) {
-      const prev  = riskScores.get(o.countryCode) ?? 0;
+      const prev = riskScores.get(o.countryCode) ?? 0;
       const score = riskWeight[o.alertLevel] ?? 0.2;
       if (score > prev) riskScores.set(o.countryCode, score);
     }
@@ -531,21 +601,18 @@ export async function initApp(): Promise<void> {
     setSelectedDate(todayStr);
     outbreaksPanel.filterByDate(null); // show all days, not just today
 
-    // 11. Load district GeoJSON boundaries (non-blocking)
-    fetch('/data/vietnam-districts.geojson')
-      .then(r => r.json())
-      .then(geoJson => {
-        setDistrictGeoJson(geoJson);
-        console.info(`[EpidemicMonitor] District boundaries loaded: ${geoJson.features?.length} districts`);
-      })
-      .catch(() => { /* District boundaries optional — map still works without */ });
+    // 11. Legacy district boundaries are intentionally not loaded. The bundled
+    // ADM2 file predates the 34-province administrative model and can mislead
+    // outbreak interpretation.
 
     // 12. Fetch climate forecasts + compute early warnings (non-blocking)
     fetchClimateForecasts().then((forecasts) => {
+      latestClimateForecasts = forecasts;
       climatePanel.updateData(forecasts);
+      regionalSignalsPanel.updateData(ctx.outbreaks, forecasts);
 
       // Early warnings: provinces with HIGH climate risk but NO active outbreak
-      const outbreakProvinces = new Set(outbreaks.map(o => o.country));
+      const outbreakProvinces = new Set(outbreaks.map(o => canonicalProvinceName(o.province ?? '')).filter(Boolean));
       const warnings = detectEarlyWarnings(forecasts, outbreakProvinces);
       if (warnings.length > 0) {
         setEarlyWarnings(warnings);
@@ -559,44 +626,6 @@ export async function initApp(): Promise<void> {
     on('province-selected', (data) => {
       const { lat, lng } = data as { lat: number; lng: number; province: string };
       mapShell.flyTo([lng, lat], 8);
-    });
-
-    // 12. Initialize LLM (non-blocking — chat works without it)
-    initLLM().then((provider) => {
-      if (provider) {
-        chatPanel.setStatus('Trực tuyến', true);
-
-        // Wire data pipeline LLM functions
-        setLLMComplete(complete);
-
-        // Run data pipeline cleanup on a COPY to avoid mutating shared state
-        // (panels hold references to the original arrays)
-        void processOutbreaks([...outbreaks]);
-        void processNews([...news]);
-
-        // Wire chat send → LLM streaming
-        chatPanel.onSend = (text) => {
-          const history = chatPanel.getHistory()
-            .filter(m => m.role !== 'assistant' || !m.content.startsWith('Xin chào'))
-            .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content }));
-          const messages = buildMessages(text, history);
-
-          chat(
-            messages,
-            (chunk) => chatPanel.appendChunk(chunk),
-            () => chatPanel.endStreaming(),
-          ).catch((err) => {
-            console.error('[chat] LLM request failed:', err);
-            const errMsg = err instanceof Error ? err.message : String(err);
-            chatPanel.appendChunk(`\n⚠️ Lỗi: ${errMsg}`);
-            chatPanel.endStreaming();
-          });
-        };
-      } else {
-        chatPanel.setStatus('Chưa kết nối', false);
-      }
-    }).catch(() => {
-      chatPanel.setStatus('Không kết nối được', false);
     });
 
     console.info('[EpidemicMonitor] App initialized');

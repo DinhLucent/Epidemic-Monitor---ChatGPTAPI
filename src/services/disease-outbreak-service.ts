@@ -9,6 +9,10 @@ import { cachedFetch } from '@/services/fetch-cache';
 const CACHE_KEY = 'disease-outbreaks';
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
+interface FetchDiseaseOutbreaksOptions {
+  graceful?: boolean;
+}
+
 interface OutbreaksResponse {
   outbreaks: DiseaseOutbreakItem[];
   fetchedAt: number;
@@ -18,7 +22,10 @@ interface OutbreaksResponse {
  * Fetch active disease outbreaks.
  * Returns empty array on error so callers can render gracefully in dev mode.
  */
-export async function fetchDiseaseOutbreaks(): Promise<DiseaseOutbreakItem[]> {
+export async function fetchDiseaseOutbreaks(
+  options: FetchDiseaseOutbreaksOptions = {},
+): Promise<DiseaseOutbreakItem[]> {
+  const { graceful = true } = options;
   try {
     return await cachedFetch(
       CACHE_KEY,
@@ -28,7 +35,8 @@ export async function fetchDiseaseOutbreaks(): Promise<DiseaseOutbreakItem[]> {
       },
       CACHE_TTL,
     );
-  } catch {
+  } catch (err) {
+    if (!graceful) throw err;
     // Edge functions unavailable in Vite dev mode — return empty gracefully
     return [];
   }

@@ -6,6 +6,7 @@
  */
 
 import type { SnapshotRecord } from '@/services/snapshot-store';
+import { canonicalProvinceName } from '@/services/province-normalizer';
 
 // ---------------------------------------------------------------------------
 // Alert escalation detection
@@ -80,6 +81,6 @@ export function detectEarlyWarnings(
   outbreakProvinces: Set<string>,
 ): EarlyWarning[] {
   return climateForecasts
-    .filter(f => (f.dengueRisk >= 0.6 || f.hfmdRisk >= 0.6) && !outbreakProvinces.has(f.province))
+    .filter(f => (f.dengueRisk >= 0.6 || f.hfmdRisk >= 0.6) && !outbreakProvinces.has(canonicalProvinceName(f.province)))
     .map(f => ({ province: f.province, lat: f.lat, lng: f.lng, dengueRisk: f.dengueRisk, hfmdRisk: f.hfmdRisk }));
 }

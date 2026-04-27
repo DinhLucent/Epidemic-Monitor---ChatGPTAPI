@@ -1,27 +1,17 @@
 /**
  * Climate Predictive Alerts endpoint — Cloudflare Pages Function.
- * Fetches 14-day weather forecast from Open-Meteo for 8 Vietnam provinces
- * and computes dengue / HFMD risk scores. Cache TTL: 6 hours.
+ * Fetches 14-day weather forecast + 5-day air quality forecast from Open-Meteo
+ * for Vietnam's 34 current province-level units. Cache TTL: 6 hours.
  * No D1 needed — external API only.
  */
 import { jsonResponse, errorResponse } from '../../../_shared/cors';
 import { getCached, setCached } from '../../../_shared/cache';
+import { VIETNAM_PROVINCES_2025, type VietnamProvince } from '../../../_shared/vietnam-provinces';
 
 const CACHE_KEY = 'climate-forecasts';
 const CACHE_TTL = 6 * 60 * 60 * 1000; // 6 hours
 
-interface Province { name: string; lat: number; lng: number; }
-
-const PROVINCES: Province[] = [
-  { name: 'Ho Chi Minh City', lat: 10.82, lng: 106.63 },
-  { name: 'Ha Noi',           lat: 21.03, lng: 105.85 },
-  { name: 'Da Nang',          lat: 16.05, lng: 108.22 },
-  { name: 'Can Tho',          lat: 10.04, lng: 105.79 },
-  { name: 'Hai Phong',        lat: 20.86, lng: 106.68 },
-  { name: 'Khanh Hoa',        lat: 12.25, lng: 109.05 },
-  { name: 'Binh Duong',       lat: 11.17, lng: 106.65 },
-  { name: 'Dong Nai',         lat: 10.95, lng: 106.82 },
-];
+const PROVINCES: VietnamProvince[] = VIETNAM_PROVINCES_2025;
 
 interface OpenMeteoDaily {
   time: string[];
@@ -33,15 +23,36 @@ interface OpenMeteoDaily {
 
 interface OpenMeteoResponse { daily: OpenMeteoDaily; }
 
+interface OpenMeteoAirQualityHourly {
+  time: string[];
+  pm2_5?: number[];
+  pm10?: number[];
+  ozone?: number[];
+  nitrogen_dioxide?: number[];
+}
+
+interface OpenMeteoAirQualityResponse { hourly: OpenMeteoAirQualityHourly; }
+
 async function fetchWeather(lat: number, lng: number): Promise<OpenMeteoResponse> {
   const url =
     `https://api.open-meteo.com/v1/forecast` +
     `?latitude=${lat}&longitude=${lng}` +
     `&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,relative_humidity_2m_mean` +
     `&forecast_days=14&timezone=Asia%2FBangkok`;
-  const res = await fetch(url);
+  const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
   if (!res.ok) throw new Error(`Open-Meteo ${res.status} for ${lat},${lng}`);
   return res.json() as Promise<OpenMeteoResponse>;
+}
+
+async function fetchAirQuality(lat: number, lng: number): Promise<OpenMeteoAirQualityResponse> {
+  const url =
+    `https://air-quality-api.open-meteo.com/v1/air-quality` +
+    `?latitude=${lat}&longitude=${lng}` +
+    `&hourly=pm2_5,pm10,ozone,nitrogen_dioxide` +
+    `&forecast_days=5&timezone=Asia%2FBangkok`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+  if (!res.ok) throw new Error(`Open-Meteo AQ ${res.status} for ${lat},${lng}`);
+  return res.json() as Promise<OpenMeteoAirQualityResponse>;
 }
 
 type RiskLevel = 'LOW' | 'MODERATE' | 'HIGH';
@@ -65,22 +76,86 @@ function hfmdScore(tempMax: number, humidity: number): number {
   return Math.min(1, tempFactor * 0.5 + humidFactor * 0.5);
 }
 
+function avg(values: Array<number | null | undefined>): number | undefined {
+  const valid = values.filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+  if (valid.length === 0) return undefined;
+  return valid.reduce((sum, value) => sum + value, 0) / valid.length;
+}
+
+function pollutantScore(value: number | undefined, moderate: number, high: number): number {
+  if (value == null) return 0;
+  if (value >= high) return 1;
+  if (value >= moderate) return 0.6;
+  return value > 0 ? 0.2 : 0;
+}
+
+function airQualityScore(pm25?: number, pm10?: number, ozone?: number, no2?: number): number {
+  return Math.max(
+    pollutantScore(pm25, 15, 35),
+    pollutantScore(pm10, 45, 100),
+    pollutantScore(ozone, 100, 180),
+    pollutantScore(no2, 25, 100),
+  );
+}
+
+function respiratoryScore(airScore: number, tempMax: number, humidity: number): number {
+  const humidFactor = humidity >= 85 ? 0.8 : humidity >= 75 ? 0.55 : humidity >= 65 ? 0.35 : 0.15;
+  const heatFactor = tempMax >= 35 ? 0.55 : tempMax >= 30 ? 0.35 : 0.15;
+  return Math.min(1, airScore * 0.65 + humidFactor * 0.2 + heatFactor * 0.15);
+}
+
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<Array<PromiseSettledResult<R>>> {
+  const results: Array<PromiseSettledResult<R>> = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      try {
+        results[index] = { status: 'fulfilled', value: await fn(items[index]!) };
+      } catch (reason) {
+        results[index] = { status: 'rejected', reason };
+      }
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 export interface ClimateForecast {
   province: string; lat: number; lng: number;
   dengueRisk: number; hfmdRisk: number;
   dengueLevel: RiskLevel; hfmdLevel: RiskLevel;
+  airQualityRisk: number; airQualityLevel: RiskLevel;
+  respiratoryRisk: number; respiratoryLevel: RiskLevel;
   tempMax: number; tempMin: number; rainfall: number; humidity: number;
+  pm25?: number; pm10?: number; ozone?: number; nitrogenDioxide?: number;
   forecastDays: number; peakRiskDay: string;
 }
 
-function buildForecast(province: Province, data: OpenMeteoDaily): ClimateForecast {
+function buildForecast(
+  province: VietnamProvince,
+  data: OpenMeteoDaily,
+  airData?: OpenMeteoAirQualityHourly,
+): ClimateForecast {
   const { time, temperature_2m_max, temperature_2m_min, precipitation_sum, relative_humidity_2m_mean } = data;
-  const avg = (arr: number[]) => arr.reduce((s, v) => s + (v ?? 0), 0) / arr.length;
 
-  const tempMax  = parseFloat(avg(temperature_2m_max).toFixed(1));
-  const tempMin  = parseFloat(avg(temperature_2m_min).toFixed(1));
-  const rainfall = parseFloat(avg(precipitation_sum).toFixed(1));
-  const humidity = parseFloat(avg(relative_humidity_2m_mean).toFixed(1));
+  const tempMax  = parseFloat((avg(temperature_2m_max) ?? 0).toFixed(1));
+  const tempMin  = parseFloat((avg(temperature_2m_min) ?? 0).toFixed(1));
+  const rainfall = parseFloat((avg(precipitation_sum) ?? 0).toFixed(1));
+  const humidity = parseFloat((avg(relative_humidity_2m_mean) ?? 0).toFixed(1));
+  const pm25 = avg(airData?.pm2_5 ?? []);
+  const pm10 = avg(airData?.pm10 ?? []);
+  const ozone = avg(airData?.ozone ?? []);
+  const nitrogenDioxide = avg(airData?.nitrogen_dioxide ?? []);
+  const airQualityRisk = parseFloat(airQualityScore(pm25, pm10, ozone, nitrogenDioxide).toFixed(2));
+  const respiratoryRisk = parseFloat(respiratoryScore(airQualityRisk, tempMax, humidity).toFixed(2));
+  const dengueRisk = parseFloat(dengueScore(tempMax, rainfall, humidity).toFixed(2));
+  const hfmdRisk = parseFloat(hfmdScore(tempMax, humidity).toFixed(2));
 
   let peakScore = -1;
   let peakRiskDay = time[0] ?? '';
@@ -95,11 +170,19 @@ function buildForecast(province: Province, data: OpenMeteoDaily): ClimateForecas
 
   return {
     province: province.name, lat: province.lat, lng: province.lng,
-    dengueRisk: parseFloat(dengueScore(tempMax, rainfall, humidity).toFixed(2)),
-    hfmdRisk:   parseFloat(hfmdScore(tempMax, humidity).toFixed(2)),
-    dengueLevel: riskLevel(parseFloat(dengueScore(tempMax, rainfall, humidity).toFixed(2))),
-    hfmdLevel:   riskLevel(parseFloat(hfmdScore(tempMax, humidity).toFixed(2))),
+    dengueRisk,
+    hfmdRisk,
+    dengueLevel: riskLevel(dengueRisk),
+    hfmdLevel: riskLevel(hfmdRisk),
+    airQualityRisk,
+    airQualityLevel: riskLevel(airQualityRisk),
+    respiratoryRisk,
+    respiratoryLevel: riskLevel(respiratoryRisk),
     tempMax, tempMin, rainfall, humidity,
+    pm25: pm25 == null ? undefined : parseFloat(pm25.toFixed(1)),
+    pm10: pm10 == null ? undefined : parseFloat(pm10.toFixed(1)),
+    ozone: ozone == null ? undefined : parseFloat(ozone.toFixed(1)),
+    nitrogenDioxide: nitrogenDioxide == null ? undefined : parseFloat(nitrogenDioxide.toFixed(1)),
     forecastDays: time.length, peakRiskDay,
   };
 }
@@ -108,13 +191,20 @@ export const onRequestGet: PagesFunction<Env> = async (_context) => {
   const cached = getCached<{ forecasts: ClimateForecast[]; fetchedAt: number }>(CACHE_KEY);
   if (cached) return jsonResponse(cached, 200, 21600);
 
-  const results = await Promise.allSettled(PROVINCES.map(p => fetchWeather(p.lat, p.lng)));
+  const results = await mapLimit(PROVINCES, 4, async (p) => {
+    const [weather, airQuality] = await Promise.allSettled([
+      fetchWeather(p.lat, p.lng),
+      fetchAirQuality(p.lat, p.lng),
+    ]);
+    if (weather.status !== 'fulfilled') throw weather.reason;
+    return buildForecast(p, weather.value.daily, airQuality.status === 'fulfilled' ? airQuality.value.hourly : undefined);
+  });
 
   const forecasts: ClimateForecast[] = [];
   for (let i = 0; i < results.length; i++) {
     const result = results[i];
     if (result?.status === 'fulfilled') {
-      try { forecasts.push(buildForecast(PROVINCES[i]!, result.value.daily)); } catch { /* skip */ }
+      try { forecasts.push(result.value); } catch { /* skip */ }
     }
   }
 

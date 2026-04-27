@@ -3,7 +3,7 @@
  * Reduces 3 function invocations to 1, saving ~67% of CF Pages quota.
  * Falls back to individual service calls if bulk endpoint unavailable.
  */
-import type { DiseaseOutbreakItem, EpidemicStats, NewsItem } from '@/types/index';
+import type { DataFreshness, DiseaseOutbreakItem, EpidemicStats, NewsItem } from '@/types/index';
 import { apiFetch } from '@/services/api-client';
 import { cachedFetch, invalidateCache } from '@/services/fetch-cache';
 
@@ -15,12 +15,44 @@ interface BulkResponse {
   stats: EpidemicStats;
   news: { items: NewsItem[]; source: string };
   fetchedAt: number;
+  freshness?: DataFreshness;
 }
 
 interface BulkData {
   outbreaks: DiseaseOutbreakItem[];
   stats: EpidemicStats;
   news: NewsItem[];
+  freshness: DataFreshness;
+}
+
+function maxTimestamp(values: Array<number | undefined>): number | undefined {
+  const valid = values.filter((value): value is number => value !== undefined && Number.isFinite(value) && value > 0);
+  return valid.length > 0 ? Math.max(...valid) : undefined;
+}
+
+function deriveFreshness(
+  outbreaks: DiseaseOutbreakItem[],
+  news: NewsItem[],
+  apiFetchedAt: number,
+): DataFreshness {
+  const sources = new Set<string>();
+  for (const outbreak of outbreaks) {
+    for (const label of outbreak.sourceLabels ?? []) sources.add(label);
+    if (outbreak.source) sources.add(outbreak.source);
+  }
+  for (const item of news) {
+    if (item.source) sources.add(item.source);
+  }
+
+  return {
+    apiFetchedAt,
+    pipelineUpdatedAt: maxTimestamp(outbreaks.map((outbreak) => outbreak.pipelineUpdatedAt)),
+    latestArticlePublishedAt: maxTimestamp([
+      ...outbreaks.map((outbreak) => outbreak.latestArticlePublishedAt ?? outbreak.publishedAt),
+      ...news.map((item) => item.publishedAt),
+    ]),
+    sourceCount: sources.size,
+  };
 }
 
 /**
@@ -32,10 +64,13 @@ export async function fetchBulkData(): Promise<BulkData> {
     CACHE_KEY,
     async () => {
       const res = await apiFetch<BulkResponse>('/api/health/v1/all');
+      const outbreaks = res.outbreaks ?? [];
+      const news = res.news?.items ?? [];
       return {
-        outbreaks: res.outbreaks ?? [],
+        outbreaks,
         stats: res.stats ?? { totalOutbreaks: 0, activeAlerts: 0, countriesAffected: 0, topDiseases: [], lastUpdated: 0 },
-        news: res.news?.items ?? [],
+        news,
+        freshness: res.freshness ?? deriveFreshness(outbreaks, news, res.fetchedAt ?? Date.now()),
       };
     },
     CACHE_TTL,

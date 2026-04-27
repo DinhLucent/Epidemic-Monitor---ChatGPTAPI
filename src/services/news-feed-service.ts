@@ -9,6 +9,10 @@ import { cachedFetch } from '@/services/fetch-cache';
 const CACHE_KEY = 'health-news';
 const CACHE_TTL = 15 * 60 * 1000; // 15 minutes
 
+interface FetchHealthNewsOptions {
+  graceful?: boolean;
+}
+
 interface NewsResponse {
   items: NewsItem[];
   fetchedAt: number;
@@ -19,7 +23,10 @@ interface NewsResponse {
  * Fetch aggregated health news from WHO, CDC, ProMED, ECDC, ReliefWeb.
  * Returns empty array on error for graceful degradation in dev mode.
  */
-export async function fetchHealthNews(): Promise<NewsItem[]> {
+export async function fetchHealthNews(
+  options: FetchHealthNewsOptions = {},
+): Promise<NewsItem[]> {
+  const { graceful = true } = options;
   try {
     return await cachedFetch(
       CACHE_KEY,
@@ -29,7 +36,8 @@ export async function fetchHealthNews(): Promise<NewsItem[]> {
       },
       CACHE_TTL,
     );
-  } catch {
+  } catch (err) {
+    if (!graceful) throw err;
     return [];
   }
 }

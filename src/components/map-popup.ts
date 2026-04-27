@@ -85,6 +85,24 @@ export class MapPopup {
       new Date(item.publishedAt).toLocaleDateString(),
     );
 
+    const qualityParts = [
+      item.riskScore != null ? `score ${Math.round(item.riskScore)}` : null,
+      item.confidence != null ? `${Math.round(item.confidence * 100)}% confidence` : null,
+      item.sourceCount ? `${item.sourceCount} sources` : null,
+      item.officialConfirmed ? 'official-backed' : null,
+    ].filter(Boolean);
+    const quality = qualityParts.length > 0
+      ? h('p', { className: 'map-popup-quality' }, qualityParts.join(' · '))
+      : null;
+
+    const sources = item.sourceLabels?.length
+      ? h('p', { className: 'map-popup-sources' }, item.sourceLabels.slice(0, 3).join(', '))
+      : null;
+
+    const summary = item.summary
+      ? h('p', { className: 'map-popup-summary' }, escapeHtml(item.summary))
+      : null;
+
     const safeUrl = sanitizeUrl(item.url);
     const footer = safeUrl
       ? h('a', {
@@ -99,6 +117,9 @@ export class MapPopup {
     this._el.appendChild(disease);
     this._el.appendChild(country);
     this._el.appendChild(date);
+    if (quality) this._el.appendChild(quality);
+    if (sources) this._el.appendChild(sources);
+    if (summary) this._el.appendChild(summary);
     this._el.appendChild(footer);
   }
 

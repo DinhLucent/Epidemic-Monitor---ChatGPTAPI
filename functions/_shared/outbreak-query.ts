@@ -4,6 +4,11 @@
  */
 import { diseaseLabel } from './disease-labels';
 import { casesPerMillion, populationK } from './vn-province-population';
+import {
+  type GeoPrecision,
+  scoreOutbreakEvidence,
+  summarizeSources,
+} from './source-registry';
 
 /** Vietnam province centroids — used to add lat/lng to pipeline hotspot items. */
 const VN_PROVINCES: Record<string, [number, number]> = {
@@ -127,7 +132,10 @@ interface HotspotRow {
   peak_cases: number | null;
   article_count: number;
   source_types: string;
+  source_names: string;
   source_urls: string;
+  latest_published_at: number | null;
+  latest_ingested_at: number | null;
 }
 
 export interface OutbreakItem {
@@ -146,6 +154,16 @@ export interface OutbreakItem {
   lng?: number;
   source: string;
   cases?: number;
+  sourceCount?: number;
+  sourceLabels?: string[];
+  officialConfirmed?: boolean;
+  riskScore?: number;
+  confidence?: number;
+  riskFactors?: string[];
+  extractionWarnings?: string[];
+  geoPrecision?: GeoPrecision;
+  latestArticlePublishedAt?: number;
+  pipelineUpdatedAt?: number;
 }
 
 /**
@@ -188,7 +206,7 @@ function capAlertByCases(
  * E.g. "https://vnexpress.net/...|https://tuoitre.vn/..." → "vnexpress.net".
  */
 function extractPrimaryPublisher(sourceUrls: string): string {
-  const firstUrl = sourceUrls.split('|')[0] ?? '';
+  const firstUrl = sourceUrls.split(/[|,]+/)[0] ?? '';
   try {
     const u = new URL(firstUrl);
     return u.hostname.replace(/^www\./, '');
@@ -197,12 +215,19 @@ function extractPrimaryPublisher(sourceUrls: string): string {
   }
 }
 
+function asTimestamp(value: number | string | null | undefined): number | undefined {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
 export function mapHotspots(hotspots: HotspotRow[]): OutbreakItem[] {
   return hotspots.map(h => {
     const province = String(h.province ?? '');
     const coords = resolveProvinceCoords(province);
     const districtIdSuf = h.district ? `:${h.district}` : '';
     const cases = h.peak_cases ? Number(h.peak_cases) : undefined;
+    const publishedAt = asTimestamp(h.latest_published_at) ?? new Date(String(h.day)).getTime();
+    const pipelineUpdatedAt = asTimestamp(h.latest_ingested_at);
     const alertLevel = capAlertByCases(
       (h.peak_alert as 'alert' | 'warning' | 'watch') ?? 'watch',
       cases,
@@ -210,6 +235,17 @@ export function mapHotspots(hotspots: HotspotRow[]): OutbreakItem[] {
     );
     const articleCount = Number(h.article_count ?? 1);
     const primarySource = extractPrimaryPublisher(String(h.source_urls ?? ''));
+    const sourceSummary = summarizeSources(String(h.source_urls ?? ''), String(h.source_names ?? ''));
+    const geoPrecision: GeoPrecision = h.district ? 'district' : province ? 'province' : 'unknown';
+    const perMillion = cases != null ? casesPerMillion(cases, province) : 0;
+    const score = scoreOutbreakEvidence({
+      articleCount,
+      casesPerMillion: perMillion,
+      daysOld: Math.max(0, (Date.now() - publishedAt) / 86_400_000),
+      alertLevel,
+      geoPrecision,
+      sources: sourceSummary,
+    });
     const locationPart = h.district ? `${h.district}, ${province}` : province;
     // Legal-safe wording: frame the item as "báo chí đưa tin về…" instead of
     // asserting an outbreak exists. All claims are attributed to the source.
@@ -237,13 +273,23 @@ export function mapHotspots(hotspots: HotspotRow[]): OutbreakItem[] {
       title,
       summary,
       url: String((h.source_urls as string)?.split('|')[0] ?? ''),
-      publishedAt: new Date(String(h.day)).getTime(),
+      publishedAt,
       province,
       district: h.district ?? undefined,
       lat: coords[0],
       lng: coords[1],
       source: `pipeline:${String(h.source_types ?? '')}`,
       cases,
+      sourceCount: sourceSummary.sourceCount,
+      sourceLabels: sourceSummary.labels.slice(0, 4),
+      officialConfirmed: sourceSummary.officialConfirmed,
+      riskScore: score.riskScore,
+      confidence: score.confidence,
+      riskFactors: score.riskFactors,
+      extractionWarnings: score.extractionWarnings,
+      geoPrecision,
+      latestArticlePublishedAt: publishedAt,
+      pipelineUpdatedAt,
     };
   });
 }
@@ -285,15 +331,18 @@ export async function fetchOutbreaksFromD1(db: D1Database): Promise<OutbreakItem
         WHEN 3 THEN 'alert' WHEN 2 THEN 'warning' ELSE 'watch'
       END AS peak_alert,
       MAX(cases) AS peak_cases,
-      COUNT(*) AS article_count,
+      COUNT(DISTINCT LOWER(CASE WHEN instr(url, '?') > 0 THEN substr(url, 1, instr(url, '?') - 1) ELSE url END)) AS article_count,
       GROUP_CONCAT(DISTINCT source_type) AS source_types,
-      GROUP_CONCAT(url, '|') AS source_urls
+      GROUP_CONCAT(DISTINCT source) AS source_names,
+      GROUP_CONCAT(DISTINCT CASE WHEN instr(url, '?') > 0 THEN substr(url, 1, instr(url, '?') - 1) ELSE url END) AS source_urls,
+      MAX(published_at) AS latest_published_at,
+      MAX(ingested_at) AS latest_ingested_at
     FROM outbreak_items
     WHERE source_type IN (${WHITELISTED_SOURCE_TYPES.map(() => '?').join(',')})
       AND published_at > (strftime('%s','now') - ? * 86400) * 1000
       AND disease NOT IN ('african-swine-fever', 'avian-influenza')
       -- VN-only guard (layer 1): LLM-extracted country must be Vietnam or null.
-      AND (country IS NULL OR LOWER(country) IN ('vietnam', 'viet nam', 'việt nam', 'vn'))
+      AND (LOWER(COALESCE(country, '')) IN ('vietnam', 'viet nam', 'việt nam', 'vn') OR province IS NOT NULL)
       -- VN-only guard (layer 2): reject titles that obviously name a foreign
       -- country. Catches VN newspapers reporting on foreign outbreaks where
       -- M2.7 failed to tag country (e.g. Thanh Niên Bangladesh measles).

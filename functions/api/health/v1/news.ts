@@ -9,6 +9,7 @@ import { getCached, setCached } from '../../../_shared/cache';
 const CACHE_KEY = 'news';
 const CACHE_TTL = 15 * 60 * 1000; // 15 minutes
 const NEWS_LIMIT = 50;
+const NEWS_SCAN_LIMIT = 150;
 
 interface NewsItem {
   id: string;
@@ -17,6 +18,17 @@ interface NewsItem {
   url: string;
   publishedAt: number;
   summary?: string;
+}
+
+function canonicalUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    url.hash = '';
+    url.search = '';
+    return url.toString().replace(/\/$/, '').toLowerCase();
+  } catch {
+    return value.trim().toLowerCase();
+  }
 }
 
 /** Fetch news items from D1 outbreak_items table.
@@ -29,7 +41,7 @@ async function fetchNewsFromD1(db: D1Database): Promise<NewsItem[]> {
     FROM outbreak_items
     WHERE url IS NOT NULL AND title IS NOT NULL
       AND source_type = 'web'
-      AND (country IS NULL OR LOWER(country) IN ('vietnam', 'viet nam', 'việt nam', 'vn'))
+      AND (LOWER(COALESCE(country, '')) IN ('vietnam', 'viet nam', 'việt nam', 'vn') OR province IS NOT NULL)
       AND LOWER(title) NOT GLOB '*bangladesh*'
       AND LOWER(title) NOT GLOB '*pakistan*'
       AND LOWER(title) NOT GLOB '*argentina*'
@@ -48,7 +60,7 @@ async function fetchNewsFromD1(db: D1Database): Promise<NewsItem[]> {
       AND LOWER(title) NOT GLOB '*africa*'
     ORDER BY COALESCE(published_at, ingested_at) DESC
     LIMIT ?
-  `).bind(NEWS_LIMIT).all<{ id: string; title: string; source: string; url: string; published_at: string; summary: string | null }>();
+  `).bind(NEWS_SCAN_LIMIT).all<{ id: string; title: string; source: string; url: string; published_at: string; summary: string | null }>();
 
   return (result.results ?? []).map(row => ({
     id: String(row.id),
@@ -67,10 +79,15 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
   try {
     const items = await fetchNewsFromD1(context.env.DB);
 
-    // Deduplicate by id + sort desc + limit
+    // Deduplicate by canonical URL. Recrawls can create new IDs for the same article.
     const seen = new Set<string>();
     const deduped = items
-      .filter(item => { if (seen.has(item.id)) return false; seen.add(item.id); return true; })
+      .filter(item => {
+        const key = canonicalUrl(item.url);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
       .sort((a, b) => b.publishedAt - a.publishedAt)
       .slice(0, NEWS_LIMIT);
 
