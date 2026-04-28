@@ -4,12 +4,13 @@
  * for Vietnam's 34 current province-level units. Cache TTL: 6 hours.
  * No D1 needed — external API only.
  */
-import { jsonResponse, errorResponse } from '../../../_shared/cors';
+import { jsonResponse } from '../../../_shared/cors';
 import { getCached, setCached } from '../../../_shared/cache';
 import { VIETNAM_PROVINCES_2025, type VietnamProvince } from '../../../_shared/vietnam-provinces';
 
 const CACHE_KEY = 'climate-forecasts';
 const CACHE_TTL = 6 * 60 * 60 * 1000; // 6 hours
+const FAILURE_CACHE_TTL = 30 * 60 * 1000; // 30 minutes
 
 const PROVINCES: VietnamProvince[] = VIETNAM_PROVINCES_2025;
 
@@ -208,7 +209,15 @@ export const onRequestGet: PagesFunction<Env> = async (_context) => {
     }
   }
 
-  if (forecasts.length === 0) return errorResponse('All province weather fetches failed', 502);
+  if (forecasts.length === 0) {
+    const payload = {
+      forecasts,
+      fetchedAt: Date.now(),
+      warning: 'Climate forecast unavailable; external weather provider failed.',
+    };
+    setCached(CACHE_KEY, payload, FAILURE_CACHE_TTL);
+    return jsonResponse(payload, 200, 1800);
+  }
 
   const payload = { forecasts, fetchedAt: Date.now() };
   setCached(CACHE_KEY, payload, CACHE_TTL);

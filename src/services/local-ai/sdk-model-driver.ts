@@ -6,6 +6,7 @@ import { OUTBREAK_EXTRACTION_SCHEMA } from './outbreak-extraction-schema';
 import type { OutbreakExtractionResult } from './outbreak-extraction-types';
 import { buildBatchClassifySystemPrompt, buildBatchClassifyUserPrompt } from './batch-classify-prompt';
 import { BATCH_CLASSIFY_SCHEMA } from './batch-classify-schema';
+import { buildSourceDiscoverySystemPrompt, buildSourceDiscoveryUserPrompt, type SourceDiscoveryContext } from './source-discovery-prompt';
 import {
   canonicalizeOutbreakExtraction,
   isUsableOutbreakExtraction,
@@ -34,7 +35,22 @@ export interface BatchClassifyResult {
   index: number;
   classification: 'OUTBREAK' | 'HEALTH_NEWS' | 'IRRELEVANT';
   disease_vn: string | null;
+  disease_intl: string | null;
+  disease_category: string | null;
+  alert_level: string | null;
+  province: string | null;
+  country: string | null;
   confidence: number;
+  reasoning: string;
+}
+
+export interface SourceDiscoveryResult {
+  url: string;
+  source_type: 'rss' | 'web' | 'api';
+  reason: string;
+  expected_diseases: string[];
+  expected_provinces: string[];
+  priority: 'high' | 'medium' | 'low';
 }
 
 export interface SdkOutbreakExtractor {
@@ -47,6 +63,7 @@ export interface SdkOutbreakExtractor {
   }): Promise<OutbreakExtractionResult | null>;
   classifyBatch(items: BatchClassifyItem[]): Promise<BatchClassifyResult[]>;
   extractBatch(articles: Array<{ text: string; sourceUrl?: string }>): Promise<Array<OutbreakExtractionResult | null>>;
+  discoverSources(context: SourceDiscoveryContext): Promise<SourceDiscoveryResult[]>;
   close(): void;
 }
 
@@ -55,6 +72,8 @@ const DEFAULT_PROVIDER_ID = 'chatgpt2api-local';
 const DEFAULT_MODEL = 'auto';
 const DEFAULT_TIMEOUT_MS = 120000;
 const DEFAULT_INPUT_LIMIT = 6000;
+const CLASSIFY_POLICY_VERSION = '2026-04-28-vn-dynamic-schema-v3-event-evidence';
+const EXTRACTION_POLICY_VERSION = '2026-04-28-vn-extraction-v2';
 
 export function createSdkOutbreakExtractor(
   profile: SdkOutbreakExtractorProfile,
@@ -91,6 +110,8 @@ export function createSdkOutbreakExtractor(
       classifyBatchWithSdk(sdk, profile, items),
     extractBatch: (articles) =>
       extractBatchWithSdk(sdk, profile, articles),
+    discoverSources: (context) =>
+      discoverSourcesWithSdk(sdk, profile, context),
     close: () => store.close(),
   };
 }
@@ -159,7 +180,7 @@ export async function extractOutbreakJsonWithSdk(
 }
 
 function buildDefaultSessionKey(value: string): string {
-  return `epidemic-monitor:outbreak-extraction:${hashText(value)}`;
+  return `epidemic-monitor:outbreak-extraction:${hashText(`${EXTRACTION_POLICY_VERSION}|${value}`)}`;
 }
 
 function hashText(value: string): string {
@@ -189,7 +210,7 @@ async function classifyBatchWithSdk(
   for (let offset = 0; offset < items.length; offset += CHUNK_SIZE) {
     const chunk = items.slice(offset, offset + CHUNK_SIZE);
     const sessionKey = `epidemic-monitor:batch-classify:${hashText(
-      chunk.map((c) => c.title).join('|'),
+      `${CLASSIFY_POLICY_VERSION}|${chunk.map((c) => c.title).join('|')}`,
     )}`;
 
     const result = await sdk.runJson<
@@ -210,7 +231,7 @@ async function classifyBatchWithSdk(
       messages: [
         {
           role: 'system',
-          content: buildBatchClassifySystemPrompt({ includeAntiPatterns: true }),
+          content: buildBatchClassifySystemPrompt(),
         },
         {
           role: 'user',
@@ -229,6 +250,8 @@ async function classifyBatchWithSdk(
       for (const r of result.data.articles) {
         allResults.push({ ...r, index: r.index + offset });
       }
+    } else {
+      console.error('[classify] SDK result failed:', JSON.stringify(result, null, 2));
     }
   }
 
@@ -264,4 +287,67 @@ async function extractBatchWithSdk(
   }
 
   return results;
+}
+
+// ---------------------------------------------------------------------------
+// Source Discovery — ChatGPT suggests new data sources
+// ---------------------------------------------------------------------------
+
+async function discoverSourcesWithSdk(
+  sdk: ChatGPTtoSDK,
+  profile: SdkOutbreakExtractorProfile,
+  context: SourceDiscoveryContext,
+): Promise<SourceDiscoveryResult[]> {
+  const sessionKey = `epidemic-monitor:source-discovery:${hashText(
+    context.activeDiseases.join(',') + '|' + context.activeProvinces.join(','),
+  )}`;
+
+  const result = await sdk.runJson<
+    SourceDiscoveryContext,
+    { suggested_sources: SourceDiscoveryResult[] }
+  >({
+    sessionKey,
+    model: profile.model ?? DEFAULT_MODEL,
+    timeoutMs: profile.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    provider: {
+      strategy: 'fixed',
+      preferredProviderId: profile.providerId ?? DEFAULT_PROVIDER_ID,
+      allow: [profile.providerId ?? DEFAULT_PROVIDER_ID],
+      profile: 'research',
+    },
+    input: context,
+    schema: {
+      type: 'object',
+      required: ['suggested_sources'],
+      properties: {
+        suggested_sources: {
+          type: 'array',
+          items: {
+            type: 'object',
+            required: ['url', 'source_type', 'reason', 'expected_diseases', 'expected_provinces', 'priority'],
+            properties: {
+              url: { type: 'string' },
+              source_type: { type: 'string', enum: ['rss', 'web', 'api'] },
+              reason: { type: 'string' },
+              expected_diseases: { type: 'array', items: { type: 'string' } },
+              expected_provinces: { type: 'array', items: { type: 'string' } },
+              priority: { type: 'string', enum: ['high', 'medium', 'low'] },
+            },
+          },
+        },
+      },
+    },
+    messages: [
+      { role: 'system', content: buildSourceDiscoverySystemPrompt() },
+      { role: 'user', content: buildSourceDiscoveryUserPrompt(context) },
+    ],
+    metadata: {
+      caller: 'epidemic-monitor',
+      stage: 'source-discovery',
+      sdkAdapter: 'chatgpt-to-sdk',
+    },
+  });
+
+  if (!result.ok || !result.data?.suggested_sources) return [];
+  return result.data.suggested_sources;
 }

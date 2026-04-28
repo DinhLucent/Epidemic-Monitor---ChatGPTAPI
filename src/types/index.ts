@@ -42,6 +42,11 @@ export interface DataFreshness {
   pipelineUpdatedAt?: number;
   latestArticlePublishedAt?: number;
   sourceCount: number;
+  backgroundStatus?: 'idle' | 'running' | 'succeeded' | 'failed';
+  refreshStartedAt?: number;
+  lastSuccessfulRefreshAt?: number;
+  nextRefreshAt?: number;
+  lastRefreshDurationMs?: number;
 }
 
 export interface NewsItem {

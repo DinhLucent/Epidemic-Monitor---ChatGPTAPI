@@ -132,10 +132,10 @@ function buildTable(
 export class ClimateAlertsPanel extends Panel {
   private _forecasts: ClimateForecast[] = [];
 
-  constructor() {
+  constructor(autoLoad = true) {
     super({ id: 'climate-alerts', title: 'Climate Risk Forecast (14 days)', showCount: true, defaultRowSpan: 3 });
     this.showLoading();
-    void this._loadData();
+    if (autoLoad) void this.loadData();
   }
 
   /** Accept pre-fetched forecast data (e.g. from app-init). */
@@ -145,12 +145,12 @@ export class ClimateAlertsPanel extends Panel {
     this._render();
   }
 
-  private async _loadData(): Promise<void> {
+  async loadData(): Promise<void> {
     try {
       const forecasts = await fetchClimateForecasts();
       this.updateData(forecasts);
     } catch {
-      this.showError('Failed to load climate forecasts', () => void this._loadData());
+      this.showError('Failed to load climate forecasts', () => void this.loadData());
     }
   }
 

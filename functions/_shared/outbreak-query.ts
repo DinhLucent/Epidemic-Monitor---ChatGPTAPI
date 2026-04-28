@@ -3,6 +3,7 @@
  * Used by outbreaks.ts, stats.ts, and countries.ts to avoid internal HTTP self-calls.
  */
 import { diseaseLabel } from './disease-labels';
+import { OUTBREAK_FALSE_POSITIVE_SQL } from './outbreak-false-positive-sql';
 import { casesPerMillion, populationK } from './vn-province-population';
 import {
   type GeoPrecision,
@@ -364,6 +365,7 @@ export async function fetchOutbreaksFromD1(db: D1Database): Promise<OutbreakItem
       AND LOWER(title) NOT GLOB '*africa*'
       AND LOWER(title) NOT GLOB '*mỹ *'
       AND LOWER(title) NOT GLOB '* usa *'
+      ${OUTBREAK_FALSE_POSITIVE_SQL}
     GROUP BY disease, province, IFNULL(district, ''), day
     ORDER BY day DESC,
       MAX(CASE alert_level WHEN 'alert' THEN 3 WHEN 'warning' THEN 2 ELSE 1 END) DESC

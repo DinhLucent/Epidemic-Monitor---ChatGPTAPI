@@ -1,5 +1,6 @@
 import { jsonResponse, errorResponse } from '../../../_shared/cors';
 import { getCached, setCached } from '../../../_shared/cache';
+import { OUTBREAK_FALSE_POSITIVE_SQL } from '../../../_shared/outbreak-false-positive-sql';
 
 const CACHE_KEY = 'source-health';
 const CACHE_TTL = 15 * 60 * 1000;
@@ -49,6 +50,7 @@ async function fetchSourceHealth(db: D1Database): Promise<SourceHealthItem[]> {
     FROM outbreak_items
     WHERE COALESCE(ingested_at, published_at) > (strftime('%s','now') - 14 * 86400) * 1000
       AND (LOWER(COALESCE(country, '')) IN ('vietnam', 'viet nam', 'viá»‡t nam', 'vn') OR province IS NOT NULL)
+      ${OUTBREAK_FALSE_POSITIVE_SQL}
     GROUP BY source, source_type
     ORDER BY item_count DESC
     LIMIT 80

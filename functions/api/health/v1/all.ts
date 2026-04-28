@@ -18,6 +18,7 @@
 import { jsonResponse, errorResponse } from '../../../_shared/cors';
 import { getCached, setCached } from '../../../_shared/cache';
 import { fetchOutbreaksFromD1, type OutbreakItem } from '../../../_shared/outbreak-query';
+import { OUTBREAK_FALSE_POSITIVE_SQL } from '../../../_shared/outbreak-false-positive-sql';
 
 const CACHE_KEY = 'all-data';
 const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
@@ -127,6 +128,7 @@ async function fetchNews(db: D1Database): Promise<NewsItem[]> {
       AND LOWER(title) NOT GLOB '*china*'
       AND LOWER(title) NOT GLOB '*châu phi*'
       AND LOWER(title) NOT GLOB '*africa*'
+      ${OUTBREAK_FALSE_POSITIVE_SQL}
     ORDER BY COALESCE(published_at, ingested_at) DESC
     LIMIT ?
   `).bind(NEWS_SCAN_LIMIT).all<{ id: string; title: string; source: string; url: string; published_at: number; summary: string | null }>();

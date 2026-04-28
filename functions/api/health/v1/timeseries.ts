@@ -1,6 +1,7 @@
 import { jsonResponse, errorResponse } from '../../../_shared/cors';
 import { getCached, setCached } from '../../../_shared/cache';
 import { canonicalProvinceName } from '../../../_shared/vietnam-provinces';
+import { OUTBREAK_FALSE_POSITIVE_SQL } from '../../../_shared/outbreak-false-positive-sql';
 
 const CACHE_TTL = 15 * 60 * 1000;
 
@@ -51,6 +52,7 @@ async function fetchTimeSeries(db: D1Database, url: URL) {
       AND (LOWER(COALESCE(country, '')) IN ('vietnam', 'viet nam', 'viá»‡t nam', 'vn') OR province IS NOT NULL)
       AND (? = '' OR LOWER(province) = ?)
       AND (? = '' OR LOWER(disease) = ?)
+      ${OUTBREAK_FALSE_POSITIVE_SQL}
     GROUP BY day, disease, province
     ORDER BY day ASC, article_count DESC
     LIMIT 3000

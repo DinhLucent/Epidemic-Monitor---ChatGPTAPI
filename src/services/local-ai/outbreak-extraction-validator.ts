@@ -11,7 +11,7 @@ function normalizeKey(value: unknown): string {
   if (value === null || value === undefined) return '';
   return removeDiacritics(String(value))
     .toLowerCase()
-    .replace(/đ/g, 'd')
+    .replace(/[\u0111\u0110]/g, 'd')
     .replace(/[^a-z0-9]+/g, ' ')
     .trim();
 }
@@ -85,11 +85,86 @@ export function canonicalizeOutbreakExtraction(
   };
 }
 
+const TB_POSITIVE_CONTEXT = [
+  /\bbenh lao\b/,
+  /\bmac lao\b/,
+  /\bnghi mac lao\b/,
+  /\bca lao\b/,
+  /\blao phoi\b/,
+  /\blao khang thuoc\b/,
+  /\bsang loc lao\b/,
+  /\bphat hien\b.*\blao\b/,
+  /\btuberculosis\b/,
+  /\btb\b/,
+];
+
+const TB_NOISE_CONTEXT = [
+  /\blao xuong\b/,
+  /\blao vao\b/,
+  /\blao ra\b/,
+  /\blao dong\b/,
+  /\bnguoi lao dong\b/,
+  /\bhuan chuong lao\b/,
+  /\blon lao\b/,
+  /\blao cong\b/,
+];
+
+const RABIES_POSITIVE_CONTEXT = [
+  /\bbenh dai\b/,
+  /\bcho can\b/,
+  /\bmeo can\b/,
+  /\bcho dai\b/,
+  /\bvirus dai\b/,
+  /\bphong dai\b/,
+  /\btiem phong dai\b/,
+  /\bvac xin dai\b/,
+  /\bvaccine dai\b/,
+  /\bphoi nhiem\b.*\bdai\b/,
+  /\brabies\b/,
+];
+
+const RABIES_NOISE_CONTEXT = [
+  /\bco dai\b/,
+  /\bmoc dai\b/,
+  /\bcay\b.*\bdai\b/,
+  /\bthuoc dai\b/,
+  /\bdai hoc\b/,
+  /\bdai bieu\b/,
+  /\bdai dich\b/,
+  /\bdai thao duong\b/,
+];
+
+function hasPattern(value: string, patterns: RegExp[]): boolean {
+  return patterns.some((pattern) => pattern.test(value));
+}
+
+function isDiseaseEvidenceValid(disease: string | null, text: string): boolean {
+  const normalizedDisease = normalizeKey(disease);
+  const normalizedText = normalizeKey(text);
+  if (!normalizedDisease || normalizedDisease === 'unknown') return false;
+
+  if (/\blao\b/.test(normalizedDisease) || /\btuberculosis\b/.test(normalizedDisease)) {
+    return !hasPattern(normalizedText, TB_NOISE_CONTEXT)
+      && hasPattern(normalizedText, TB_POSITIVE_CONTEXT);
+  }
+
+  if (/\brabies\b/.test(normalizedDisease) || normalizedDisease === 'dai' || /\bbenh dai\b/.test(normalizedDisease)) {
+    return !hasPattern(normalizedText, RABIES_NOISE_CONTEXT)
+      && hasPattern(normalizedText, RABIES_POSITIVE_CONTEXT);
+  }
+
+  return true;
+}
+
 export function isUsableOutbreakExtraction(result: OutbreakExtractionResult): boolean {
   if (!result.summary_vi) return false;
   if (!SEVERITIES.has(result.severity)) return false;
   if (result.is_outbreak_news) {
-    return Boolean(result.disease_vn && (result.province || result.cases !== null));
+    return Boolean(
+      result.disease_vn
+      && isDiseaseEvidenceValid(result.disease_vn, result.summary_vi)
+      && (result.province || result.cases !== null),
+    );
   }
   return true;
 }

@@ -16,6 +16,7 @@ interface BulkResponse {
   news: { items: NewsItem[]; source: string };
   fetchedAt: number;
   freshness?: DataFreshness;
+  backgroundRefresh?: unknown;
 }
 
 interface BulkData {
@@ -23,6 +24,10 @@ interface BulkData {
   stats: EpidemicStats;
   news: NewsItem[];
   freshness: DataFreshness;
+}
+
+interface FetchBulkDataOptions {
+  refresh?: boolean;
 }
 
 function maxTimestamp(values: Array<number | undefined>): number | undefined {
@@ -59,20 +64,28 @@ function deriveFreshness(
  * Fetch all primary data in one API call.
  * Returns outbreaks, stats, and news together.
  */
-export async function fetchBulkData(): Promise<BulkData> {
+async function loadBulkData(refresh = false): Promise<BulkData> {
+  const path = refresh ? '/api/health/v1/all?refresh=1&waitMs=1000' : '/api/health/v1/all';
+  const res = await apiFetch<BulkResponse>(path, 20_000);
+  const outbreaks = res.outbreaks ?? [];
+  const news = res.news?.items ?? [];
+  return {
+    outbreaks,
+    stats: res.stats ?? { totalOutbreaks: 0, activeAlerts: 0, countriesAffected: 0, topDiseases: [], lastUpdated: 0 },
+    news,
+    freshness: res.freshness ?? deriveFreshness(outbreaks, news, res.fetchedAt ?? Date.now()),
+  };
+}
+
+export async function fetchBulkData(options: FetchBulkDataOptions = {}): Promise<BulkData> {
+  if (options.refresh) {
+    invalidateCache(CACHE_KEY);
+    return loadBulkData(true);
+  }
+
   return cachedFetch(
     CACHE_KEY,
-    async () => {
-      const res = await apiFetch<BulkResponse>('/api/health/v1/all');
-      const outbreaks = res.outbreaks ?? [];
-      const news = res.news?.items ?? [];
-      return {
-        outbreaks,
-        stats: res.stats ?? { totalOutbreaks: 0, activeAlerts: 0, countriesAffected: 0, topDiseases: [], lastUpdated: 0 },
-        news,
-        freshness: res.freshness ?? deriveFreshness(outbreaks, news, res.fetchedAt ?? Date.now()),
-      };
-    },
+    () => loadBulkData(false),
     CACHE_TTL,
   );
 }

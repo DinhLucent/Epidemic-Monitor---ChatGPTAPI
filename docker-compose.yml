@@ -1,0 +1,55 @@
+name: epidemic-monitor
+
+services:
+  web:
+    build:
+      context: ..
+      dockerfile: baocaotintucsuckhoe/Dockerfile
+    image: epidemic-monitor:local
+    command: >
+      sh -lc "npm run docker:migrate &&
+      npm run docker:web"
+    ports:
+      - "${APP_PORT:-5174}:5174"
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      CHATGPT2API_BASE_URL: ${CHATGPT2API_BASE_URL:-http://host.docker.internal:8010}
+      CHATGPT_D1_PERSIST_TO: /data/wrangler
+    volumes:
+      - epidemic-data:/data
+    restart: unless-stopped
+
+  worker:
+    image: epidemic-monitor:local
+    build:
+      context: ..
+      dockerfile: baocaotintucsuckhoe/Dockerfile
+    command: npm run docker:worker
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      CHATGPT2API_BASE_URL: ${CHATGPT2API_BASE_URL:-http://host.docker.internal:8010}
+      CHATGPT_REFRESH_QUEUE_DB_PATH: /data/chatgpt-refresh/queue.db
+      CHATGPT_REFRESH_SNAPSHOT_PATH: /data/chatgpt-refresh/latest-snapshot.json
+      CHATGPT_REFRESH_STATE_ROOT: /data/chatgpt-to-sdk
+      CHATGPT_D1_PERSIST_TO: /data/wrangler
+      CHATGPT_D1_LOCAL: "1"
+      RSS_ITEMS_PER_SOURCE: ${RSS_ITEMS_PER_SOURCE:-30}
+      CHATGPT_REFRESH_CLASSIFY_JOB_LIMIT: ${CHATGPT_REFRESH_CLASSIFY_JOB_LIMIT:-30}
+      CHATGPT_REFRESH_EXTRACT_JOB_LIMIT: ${CHATGPT_REFRESH_EXTRACT_JOB_LIMIT:-8}
+      CHATGPT_REFRESH_VERIFY_JOB_LIMIT: ${CHATGPT_REFRESH_VERIFY_JOB_LIMIT:-2}
+      CHATGPT2API_CLASSIFY_BATCH_SIZE: ${CHATGPT2API_CLASSIFY_BATCH_SIZE:-10}
+      OUTBREAK_REFRESH_INTERVAL_MS: ${OUTBREAK_REFRESH_INTERVAL_MS:-600000}
+    volumes:
+      - epidemic-data:/data
+    depends_on:
+      - web
+    restart: unless-stopped
+    profiles:
+      - worker
+
+volumes:
+  epidemic-data:

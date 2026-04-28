@@ -24,5 +24,15 @@ playwright-report/
 .understand-anything/
 
 .chatgpt-to-sdk
+.chatgpt-refresh/
 
-skilss
+# Local ad-hoc diagnostics; do not push auth-bearing scratch files.
+dummy*.py
+dummy*.err
+node.err
+test_ai_sdk.js
+test_fetch.js
+test_req.py
+intercept.log
+
+skills

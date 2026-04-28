@@ -36,6 +36,21 @@ import { setEarlyWarnings, setHighlightedProvince, setSelectedDate } from '@/com
 import { BreakingNewsBanner } from '@/components/breaking-news-banner';
 import type { DataFreshness, DiseaseOutbreakItem, EpidemicStats, NewsItem } from '@/types';
 
+const CLIMATE_BOOTSTRAP_DELAY_MS = 5000;
+
+type IdleScheduler = (callback: () => void, options?: { timeout: number }) => number;
+
+function scheduleDeferredClimateLoad(callback: () => void): void {
+  window.setTimeout(() => {
+    const requestIdle = (window as Window & { requestIdleCallback?: IdleScheduler }).requestIdleCallback;
+    if (requestIdle) {
+      requestIdle(callback, { timeout: 10000 });
+      return;
+    }
+    callback();
+  }, CLIMATE_BOOTSTRAP_DELAY_MS);
+}
+
 export async function initApp(): Promise<void> {
   try {
     // 0. First-visit disclaimer — blocks app bootstrap until user acks once
@@ -116,7 +131,7 @@ export async function initApp(): Promise<void> {
     // 3. Instantiate panels
     const outbreaksPanel = new DiseaseOutbreaksPanel();
     const topDiseasesPanel = new TopDiseasesPanel();
-    const climatePanel = new ClimateAlertsPanel();
+    const climatePanel = new ClimateAlertsPanel(false);
     const regionalSignalsPanel = new RegionalSignalsPanel();
     const banner = new BreakingNewsBanner();
 
@@ -293,10 +308,12 @@ export async function initApp(): Promise<void> {
 
     // 10. Data fetch + refresh logic
     const AUTO_REFRESH_MS = 10 * 60 * 1000;
+    const BACKGROUND_POLL_MS = 20 * 1000;
     const DATA_AGE_REFRESH_MS = 30_000;
     let lastFetchTime = 0;
     let currentFreshness: DataFreshness | null = null;
     let latestClimateForecasts: ClimateForecast[] = [];
+    let backgroundPollTimer: number | undefined;
 
     function maxTimestamp(values: Array<number | undefined>): number | undefined {
       const valid = values.filter((value): value is number => value !== undefined && Number.isFinite(value) && value > 0);
@@ -338,26 +355,45 @@ export async function initApp(): Promise<void> {
 
     function updateDataAge(): void {
       if (!lastFetchTime) { dataAge.textContent = 'Loading...'; return; }
+      if (currentFreshness?.backgroundStatus === 'running') {
+        dataAge.textContent = 'Updating...';
+        dataAge.title = [
+          currentFreshness.refreshStartedAt
+            ? `background refresh started ${new Date(currentFreshness.refreshStartedAt).toLocaleString('vi-VN')}`
+            : 'background refresh is running',
+          currentFreshness.lastSuccessfulRefreshAt
+            ? `last success ${new Date(currentFreshness.lastSuccessfulRefreshAt).toLocaleString('vi-VN')}`
+            : null,
+        ].filter(Boolean).join(' | ');
+        return;
+      }
       const dataTimestamp = currentFreshness?.pipelineUpdatedAt ?? currentFreshness?.latestArticlePublishedAt;
       dataAge.textContent = dataTimestamp ? `Data ${formatAge(dataTimestamp)}` : `Updated ${formatAge(lastFetchTime)}`;
       dataAge.title = [
         `UI fetched ${formatAge(lastFetchTime)}`,
+        currentFreshness?.backgroundStatus ? `background ${currentFreshness.backgroundStatus}` : null,
         currentFreshness?.pipelineUpdatedAt
           ? `pipeline updated ${new Date(currentFreshness.pipelineUpdatedAt).toLocaleString('vi-VN')}`
           : null,
         currentFreshness?.latestArticlePublishedAt
           ? `latest article ${new Date(currentFreshness.latestArticlePublishedAt).toLocaleString('vi-VN')}`
           : null,
+        currentFreshness?.lastSuccessfulRefreshAt
+          ? `last background success ${new Date(currentFreshness.lastSuccessfulRefreshAt).toLocaleString('vi-VN')}`
+          : null,
+        currentFreshness?.nextRefreshAt
+          ? `next background refresh ${new Date(currentFreshness.nextRefreshAt).toLocaleString('vi-VN')}`
+          : null,
         currentFreshness?.sourceCount ? `${currentFreshness.sourceCount} sources` : null,
       ].filter(Boolean).join(' | ');
     }
 
-    async function fetchAllData(): Promise<{ outbreaks: DiseaseOutbreakItem[]; stats: EpidemicStats; news: NewsItem[]; freshness: DataFreshness }> {
+    async function fetchAllData(options: { refresh?: boolean } = {}): Promise<{ outbreaks: DiseaseOutbreakItem[]; stats: EpidemicStats; news: NewsItem[]; freshness: DataFreshness }> {
       invalidateBulkCache();
 
       try {
         // Single API call: outbreaks + stats + news in one request (saves ~67% function invocations)
-        const bulk = await fetchBulkData();
+        const bulk = await fetchBulkData({ refresh: options.refresh });
         lastFetchTime = Date.now();
         currentFreshness = bulk.freshness;
         updateDataAge();
@@ -393,11 +429,29 @@ export async function initApp(): Promise<void> {
       }
     }
 
+    function scheduleBackgroundPoll(freshness: DataFreshness): void {
+      if (backgroundPollTimer !== undefined) {
+        window.clearTimeout(backgroundPollTimer);
+        backgroundPollTimer = undefined;
+      }
+      if (freshness.backgroundStatus !== 'running') return;
+
+      backgroundPollTimer = window.setTimeout(async () => {
+        backgroundPollTimer = undefined;
+        try {
+          await refreshData(true);
+        } catch {
+          // Keep the current snapshot; the backend scheduler will retry.
+        }
+      }, BACKGROUND_POLL_MS);
+    }
+
     function applyData(outbreaks: DiseaseOutbreakItem[], _stats: EpidemicStats, news: NewsItem[], freshness: DataFreshness): void {
       ctx.outbreaks = outbreaks;
       ctx.news = news;
       currentFreshness = freshness;
       updateDataAge();
+      scheduleBackgroundPoll(freshness);
 
       outbreaksPanel.updateData(outbreaks);
       topDiseasesPanel.updateData(outbreaks);
@@ -455,8 +509,8 @@ export async function initApp(): Promise<void> {
     applyData(outbreaks, stats, news, freshness);
 
     // Shared refresh logic — saves snapshot for timeline accumulation
-    async function refreshData(silent = false): Promise<void> {
-      const fresh = await fetchAllData();
+    async function refreshData(silent = false, forceBackendRefresh = false): Promise<void> {
+      const fresh = await fetchAllData({ refresh: forceBackendRefresh });
       applyData(fresh.outbreaks, fresh.stats, fresh.news, fresh.freshness);
       // Accumulate snapshot for historical timeline
       void saveSnapshot(fresh.outbreaks);
@@ -474,7 +528,7 @@ export async function initApp(): Promise<void> {
       outbreaksPanel.showLoadingState();
       dataAge.textContent = 'Refreshing...';
       try {
-        await refreshData();
+        await refreshData(false, true);
       } catch (err) {
         console.error('[EpidemicMonitor] Retry failed:', err);
         dataAge.textContent = 'Data unavailable';
@@ -493,7 +547,7 @@ export async function initApp(): Promise<void> {
       refreshBtn.classList.add('refreshing');
       dataAge.textContent = 'Refreshing...';
       try {
-        await refreshData();
+        await refreshData(false, true);
       } catch (err) {
         console.error('[EpidemicMonitor] Refresh failed:', err);
         if (shouldShowInlineLoading) {
@@ -605,21 +659,24 @@ export async function initApp(): Promise<void> {
     // ADM2 file predates the 34-province administrative model and can mislead
     // outbreak interpretation.
 
-    // 12. Fetch climate forecasts + compute early warnings (non-blocking)
-    fetchClimateForecasts().then((forecasts) => {
-      latestClimateForecasts = forecasts;
-      climatePanel.updateData(forecasts);
-      regionalSignalsPanel.updateData(ctx.outbreaks, forecasts);
+    // 12. Fetch climate forecasts after initial render. Weather is useful for
+    // regional risk enrichment, but it should not delay the outbreak dashboard.
+    scheduleDeferredClimateLoad(() => {
+      fetchClimateForecasts().then((forecasts) => {
+        latestClimateForecasts = forecasts;
+        climatePanel.updateData(forecasts);
+        regionalSignalsPanel.updateData(ctx.outbreaks, forecasts);
 
-      // Early warnings: provinces with HIGH climate risk but NO active outbreak
-      const outbreakProvinces = new Set(outbreaks.map(o => canonicalProvinceName(o.province ?? '')).filter(Boolean));
-      const warnings = detectEarlyWarnings(forecasts, outbreakProvinces);
-      if (warnings.length > 0) {
-        setEarlyWarnings(warnings);
-        console.info(`[EpidemicMonitor] ${warnings.length} early warning(s): ${warnings.map(w => w.province).join(', ')}`);
-      }
-    }).catch(() => {
-      // Climate panel shows sample data via service fallback
+        // Early warnings: provinces with HIGH climate risk but NO active outbreak
+        const outbreakProvinces = new Set(outbreaks.map(o => canonicalProvinceName(o.province ?? '')).filter(Boolean));
+        const warnings = detectEarlyWarnings(forecasts, outbreakProvinces);
+        if (warnings.length > 0) {
+          setEarlyWarnings(warnings);
+          console.info(`[EpidemicMonitor] ${warnings.length} early warning(s): ${warnings.map(w => w.province).join(', ')}`);
+        }
+      }).catch(() => {
+        // Climate panel shows sample data via service fallback
+      });
     });
 
     // Wire province-selected from climate panel → map flyTo

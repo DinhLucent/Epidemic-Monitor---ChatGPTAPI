@@ -47,6 +47,8 @@ The JSON object must contain all keys:
 - For district and ward, remove administrative prefixes like "TP", "quận", "huyện", "phường", "xã" unless the prefix is part of the proper name.
 - Use "outbreak" only for an outbreak, strong increase, or explicit outbreak signal. Use "warning" for a specific smaller cluster. Use "watch" for general advice or non-Vietnam/global watch items.
 - If the article is general advice with no concrete Vietnam location and no case count, is_outbreak_news must be false.
+- Do not extract tuberculosis from action/labor phrases: "xe lao xuống vực", "lao động", "Huân chương Lao động", "lớn lao".
+- Do not extract rabies from plant/common-language phrases: "cỏ dại", "cây mọc dại", "thuốc dại", or generic "đại dịch".
 </normalization_rules>${examples}`;
 }
 
