@@ -32,7 +32,7 @@
     "db:migrate:prod": "wrangler d1 migrations apply epidemic-monitor --remote",
     "docker:migrate": "wrangler d1 execute epidemic-monitor --local --persist-to /data/wrangler --file migrations/0001_outbreak_items.sql --yes",
     "docker:web": "wrangler pages dev dist --ip 0.0.0.0 --port 5174 --persist-to /data/wrangler --show-interactive-dev-session=false --log-level info",
-    "docker:worker": "node scripts/chatgpt-refresh-worker.mjs --loop --sync-d1 --d1-local --d1-persist-to /data/wrangler",
+    "docker:worker": "sh scripts/docker-refresh-supervisor.sh --sync-d1 --d1-local --d1-persist-to /data/wrangler",
     "test:e2e": "playwright test",
     "dev:pages": "npm run build && npx wrangler pages dev dist",
     "deploy": "npm run build && npx wrangler pages deploy dist --project-name=epidemic-monitor",

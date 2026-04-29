@@ -77,6 +77,62 @@ export interface EpidemicStats {
   lastUpdated: number;
 }
 
+export type PipelineHealthState = 'healthy' | 'draining' | 'waiting' | 'stalled' | 'failed' | 'unknown';
+
+export interface PipelineRun {
+  runId: string;
+  mode: string;
+  status: string;
+  currentStage?: string;
+  workerId?: string;
+  startedAt: number;
+  heartbeatAt?: number;
+  completedAt?: number;
+  durationMs?: number;
+  articleCount: number;
+  eventCount: number;
+  scanNew: number;
+  scanChanged: number;
+  classified: number;
+  positives: number;
+  extracted: number;
+  verified: number;
+  pendingJobs: number;
+  runningJobs: number;
+  doneJobs: number;
+  deadJobs: number;
+  d1ItemCount: number;
+  d1PublishedCount: number;
+  error?: string;
+  updatedAt: number;
+}
+
+export interface PipelineEvent {
+  eventId: string;
+  runId: string;
+  createdAt: number;
+  stage: string;
+  status: string;
+  message?: string;
+  meta?: unknown;
+}
+
+export interface PipelineStatus {
+  health: {
+    state: PipelineHealthState;
+    reason: string;
+    heartbeatAgeMs?: number;
+  };
+  latest?: {
+    run: PipelineRun;
+    events: PipelineEvent[];
+  };
+  recentRuns: PipelineRun[];
+  recentEvents: PipelineEvent[];
+  fetchedAt: number;
+  staleHeartbeatMs: number;
+}
+
 export interface OwidCountryRecord {
   location: string;
   iso_code: string;

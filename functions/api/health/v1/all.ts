@@ -25,6 +25,12 @@ const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
 const NEWS_LIMIT = 50;
 const NEWS_SCAN_LIMIT = 150;
 
+function bypassCache(request: Request): boolean {
+  const url = new URL(request.url);
+  const refresh = url.searchParams.get('refresh');
+  return refresh === '1' || refresh === 'true';
+}
+
 interface NewsItem {
   id: string;
   title: string;
@@ -153,8 +159,10 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
   // In-memory cache: warm worker instances skip D1 entirely. The returned
   // payload is byte-stable across repeat reads (same object reference) so
   // CF's auto-ETag is also stable, enabling 304 responses on repeat visits.
-  const cached = getCached<unknown>(CACHE_KEY);
-  if (cached) return jsonResponse(cached, 200, 600);
+  if (!bypassCache(context.request)) {
+    const cached = getCached<unknown>(CACHE_KEY);
+    if (cached) return jsonResponse(cached, 200, 600);
+  }
 
   try {
     // Parallel: outbreaks (7 D1 queries) + news (1 D1 query)

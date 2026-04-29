@@ -13,7 +13,10 @@ export async function apiFetch<T>(path: string, timeoutMs = 10000): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(`${API_BASE}${path}`, { signal: controller.signal });
+    const res = await fetch(`${API_BASE}${path}`, {
+      signal: controller.signal,
+      cache: path.includes('refresh=1') ? 'no-store' : 'default',
+    });
     if (!res.ok) throw new Error(`API ${res.status}: ${path}`);
     return (await res.json()) as T;
   } finally {
