@@ -26,8 +26,10 @@ import { invalidateCache } from '@/services/fetch-cache';
 import { fetchBulkData, invalidateBulkCache } from '@/services/bulk-data-service';
 import { ClimateAlertsPanel } from '@/components/climate-alerts-panel';
 import { RegionalSignalsPanel } from '@/components/regional-signals-panel';
+import { PipelineOpsPanel } from '@/components/pipeline-ops-panel';
 import { diseaseLabel } from '@/components/case-report-panel-data';
 import { fetchClimateForecasts } from '@/services/climate-service';
+import { fetchPipelineStatus } from '@/services/pipeline-status-service';
 import type { ClimateForecast } from '@/services/climate-service';
 import { canonicalProvinceName } from '@/services/province-normalizer';
 import { initSnapshotDB, saveSnapshot, getRecentSnapshots, pruneOldSnapshots } from '@/services/snapshot-store';
@@ -37,6 +39,7 @@ import { BreakingNewsBanner } from '@/components/breaking-news-banner';
 import type { DataFreshness, DiseaseOutbreakItem, EpidemicStats, NewsItem } from '@/types';
 
 const CLIMATE_BOOTSTRAP_DELAY_MS = 5000;
+const PIPELINE_STATUS_POLL_MS = 60_000;
 
 type IdleScheduler = (callback: () => void, options?: { timeout: number }) => number;
 
@@ -133,11 +136,12 @@ export async function initApp(): Promise<void> {
     const topDiseasesPanel = new TopDiseasesPanel();
     const climatePanel = new ClimateAlertsPanel(false);
     const regionalSignalsPanel = new RegionalSignalsPanel();
+    const pipelineOpsPanel = new PipelineOpsPanel();
     const banner = new BreakingNewsBanner();
 
     // 4. Flat panel list — climate forecast panel hidden (kept off for now,
     //    still computed for early-warning markers on the map).
-    const panels: HTMLElement[] = [outbreaksPanel.el, topDiseasesPanel.el, regionalSignalsPanel.el];
+    const panels: HTMLElement[] = [outbreaksPanel.el, topDiseasesPanel.el, regionalSignalsPanel.el, pipelineOpsPanel.el];
 
     // Alert summary strip — shows counts per severity level
     const summaryStrip = h('div', { className: 'alert-summary-strip' });
@@ -264,6 +268,7 @@ export async function initApp(): Promise<void> {
     ctx.panels.set(climatePanel.id, climatePanel);
     ctx.panels.set(topDiseasesPanel.id, topDiseasesPanel);
     ctx.panels.set(regionalSignalsPanel.id, regionalSignalsPanel);
+    ctx.panels.set(pipelineOpsPanel.id, pipelineOpsPanel);
 
     // 6. Map layer controls removed — all layers always on with their
     //    default visibility. Keeps the map uncluttered and mobile-friendly.
@@ -314,6 +319,7 @@ export async function initApp(): Promise<void> {
     let currentFreshness: DataFreshness | null = null;
     let latestClimateForecasts: ClimateForecast[] = [];
     let backgroundPollTimer: number | undefined;
+    let pipelinePollTimer: number | undefined;
 
     function maxTimestamp(values: Array<number | undefined>): number | undefined {
       const valid = values.filter((value): value is number => value !== undefined && Number.isFinite(value) && value > 0);
@@ -446,6 +452,23 @@ export async function initApp(): Promise<void> {
       }, BACKGROUND_POLL_MS);
     }
 
+    async function refreshPipelineStatus(silent = true): Promise<void> {
+      try {
+        const pipelineStatus = await fetchPipelineStatus({ refresh: !silent });
+        pipelineOpsPanel.updateData(pipelineStatus);
+      } catch (err) {
+        console.error('[EpidemicMonitor] Pipeline status failed:', err);
+        pipelineOpsPanel.showFetchError(() => { void refreshPipelineStatus(false); });
+      }
+    }
+
+    function schedulePipelineStatusPoll(): void {
+      if (pipelinePollTimer !== undefined) window.clearInterval(pipelinePollTimer);
+      pipelinePollTimer = window.setInterval(() => {
+        void refreshPipelineStatus(true);
+      }, PIPELINE_STATUS_POLL_MS);
+    }
+
     function applyData(outbreaks: DiseaseOutbreakItem[], _stats: EpidemicStats, news: NewsItem[], freshness: DataFreshness): void {
       ctx.outbreaks = outbreaks;
       ctx.news = news;
@@ -539,6 +562,10 @@ export async function initApp(): Promise<void> {
     if (initialOutbreakLoadFailed) {
       showOutbreakFetchError();
     }
+
+    pipelineOpsPanel.setRefreshHandler(() => { void refreshPipelineStatus(false); });
+    void refreshPipelineStatus(true);
+    schedulePipelineStatusPoll();
 
     // Refresh button handler
     refreshBtn.addEventListener('click', async () => {

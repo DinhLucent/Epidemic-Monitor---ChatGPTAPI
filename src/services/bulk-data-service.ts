@@ -65,7 +65,7 @@ function deriveFreshness(
  * Returns outbreaks, stats, and news together.
  */
 async function loadBulkData(refresh = false): Promise<BulkData> {
-  const path = refresh ? '/api/health/v1/all?refresh=1&waitMs=1000' : '/api/health/v1/all';
+  const path = refresh ? `/api/health/v1/all?refresh=1&waitMs=1000&ts=${Date.now()}` : '/api/health/v1/all';
   const res = await apiFetch<BulkResponse>(path, 20_000);
   const outbreaks = res.outbreaks ?? [];
   const news = res.news?.items ?? [];

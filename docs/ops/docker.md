@@ -47,7 +47,7 @@ docker compose up --build web
 Run web plus background ChatGPT queue worker:
 
 ```powershell
-docker compose --profile worker up --build
+docker compose up --build
 ```
 
 Open:
@@ -63,6 +63,31 @@ Persistent state is stored in the named Docker volume `epidemic-data`:
 - `/data/chatgpt-to-sdk`
 - `/data/wrangler`
 
+The default `docker compose up` path starts both `web` and `worker` so the
+refresh loop continues without needing to open the browser first. Use
+`docker compose up web` only when you intentionally want read-only UI/API.
+
+The Docker worker is supervised outside the Node process. Each refresh cycle
+runs as a separate `node scripts/chatgpt-refresh-worker.mjs --sync-d1 --d1-local`
+process, then the supervisor sleeps for `OUTBREAK_REFRESH_INTERVAL_MS` before
+starting the next cycle. This prevents a leaked handle or stuck SDK session from
+leaving the container alive but idle forever. The cycle is killed after
+`CHATGPT_REFRESH_SUPERVISOR_TIMEOUT_MS` when set, or 9 minutes by default.
+
+Before AI classification/extraction starts, the worker probes `CHATGPT2API_BASE_URL`.
+If the service is offline, AI jobs remain pending, the pipeline records
+`base-url-wait`, telemetry is published, and the next supervised cycle tries
+again. Tuning knobs:
+
+- `CHATGPT2API_BASE_URL_WAIT_MS` defaults to 300000.
+- `CHATGPT2API_BASE_URL_PROBE_TIMEOUT_MS` defaults to 7000.
+- `CHATGPT2API_BASE_URL_RETRY_DELAY_MS` defaults to 15000.
+- `CHATGPT2API_BASE_URL_MAX_RETRY_DELAY_MS` defaults to 60000.
+
+The queue claims higher-priority items first, then newer articles by
+`published_at`. Docker defaults to `CHATGPT_REFRESH_CLASSIFY_JOB_LIMIT=60` so
+fresh articles are classified sooner while the old backlog drains.
+
 ## Production worker host
 
 Cloudflare Pages should serve the app in production. The Docker image is most
@@ -74,14 +99,14 @@ One-shot production sync:
 docker run --rm --env-file .env.local epidemic-monitor:local npm run refresh:chatgpt:prod
 ```
 
-Looping production worker:
+Supervised production worker:
 
 ```powershell
 docker run -d --name epidemic-monitor-worker --restart unless-stopped `
   --env-file .env.local `
   -v epidemic-monitor-data:/data `
   epidemic-monitor:local `
-  npm run refresh:chatgpt:prod:loop
+  sh scripts/docker-refresh-supervisor.sh --sync-d1 --d1-remote
 ```
 
 Required production env:

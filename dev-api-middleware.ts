@@ -1898,20 +1898,64 @@ export function devApiMiddleware(): Plugin {
             });
           }
           else if (route === 'pipeline-status') {
+            const bg = cloneRefreshState();
+            const now = Date.now();
+            const startedAt = bg.startedAt ?? bg.lastSuccessAt ?? now;
+            const heartbeatAt = bg.completedAt ?? bg.startedAt ?? bg.lastSuccessAt ?? now;
+            const healthState = bg.status === 'failed'
+              ? 'failed'
+              : bg.status === 'running'
+                ? 'draining'
+                : bg.status === 'succeeded'
+                  ? 'healthy'
+                  : 'unknown';
+            const run = {
+              runId: 'dev-api-middleware',
+              mode: 'dev-api',
+              status: bg.status,
+              currentStage: bg.currentStage,
+              workerId: 'vite',
+              startedAt,
+              heartbeatAt,
+              completedAt: bg.completedAt,
+              durationMs: bg.durationMs,
+              articleCount: latestOutbreakPayload?.diagnostics?.scannedArticleCount ?? 0,
+              eventCount: bg.runCount ?? 0,
+              scanNew: 0,
+              scanChanged: 0,
+              classified: latestOutbreakPayload?.diagnostics?.aiCandidateCount ?? 0,
+              positives: latestOutbreakPayload?.diagnostics?.outbreakCount ?? 0,
+              extracted: latestOutbreakPayload?.outbreaks.length ?? 0,
+              verified: 0,
+              pendingJobs: 0,
+              runningJobs: bg.status === 'running' ? 1 : 0,
+              doneJobs: bg.status === 'succeeded' ? 1 : 0,
+              deadJobs: 0,
+              d1ItemCount: 0,
+              d1PublishedCount: 0,
+              error: bg.error,
+              updatedAt: heartbeatAt,
+            };
             data = {
-              backgroundRefresh: cloneRefreshState(),
-              hasSnapshot: Boolean(latestOutbreakPayload),
-              scheduler: {
-                enabled: process.env.OUTBREAK_BACKGROUND_REFRESH !== '0',
-                intervalMs: OUTBREAK_REFRESH_INTERVAL_MS,
-                retryMs: OUTBREAK_REFRESH_RETRY_MS,
-                maxItemsPerSource: MAX_RSS_ITEMS_PER_SOURCE,
-                maxAiItems: MAX_RSS_ITEMS_FOR_AI,
-                classifyBatchSize: AI_CLASSIFY_BATCH_SIZE,
-                classifyConcurrency: AI_CLASSIFY_CONCURRENCY,
-                maxStage2Items: MAX_STAGE2_EXTRACTIONS,
-                hardTimeoutMs: OUTBREAK_REFRESH_HARD_TIMEOUT_MS,
+              health: {
+                state: healthState,
+                reason: bg.error ?? (bg.status === 'running' ? 'Dev middleware refresh is running.' : 'Dev middleware scheduler status.'),
               },
+              latest: {
+                run,
+                events: [{
+                  eventId: `dev-${heartbeatAt}`,
+                  runId: run.runId,
+                  createdAt: heartbeatAt,
+                  stage: bg.currentStage ?? 'idle',
+                  status: bg.status,
+                  message: bg.reason ?? 'dev middleware',
+                }],
+              },
+              recentRuns: [run],
+              recentEvents: [],
+              fetchedAt: now,
+              staleHeartbeatMs: OUTBREAK_REFRESH_HARD_TIMEOUT_MS * 2,
             };
           }
           else if (route === 'stats') data = await handleStats();

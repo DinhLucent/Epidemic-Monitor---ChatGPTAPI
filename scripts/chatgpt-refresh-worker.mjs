@@ -6,7 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createChatGPTtoSDK, fileArtifactStore } from '@chatgpt-to-sdk/sdk-ts';
 import { sqliteStore } from '@chatgpt-to-sdk/session-sqlite';
 import { openAICompatibleProvider } from '@chatgpt-to-sdk/provider-openai-compatible';
-import { syncQueueToD1 } from './sync-chatgpt-queue-to-d1.mjs';
+import { syncPipelineTelemetryToD1, syncQueueToD1 } from './sync-chatgpt-queue-to-d1.mjs';
 
 const POLICY_VERSION = '2026-04-28-chatgpt-refresh-v1';
 const DEFAULT_SNAPSHOT_PATH = '.chatgpt-refresh/latest-snapshot.json';
@@ -291,6 +291,92 @@ async function fetchWithTimeout(url, timeoutMs, init = {}) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}
+
+function baseUrlProbeUrl(baseUrl) {
+  const url = new URL(baseUrl);
+  const basePath = url.pathname.replace(/\/+$/, '');
+  url.pathname = basePath.endsWith('/v1') ? `${basePath}/models` : `${basePath}/v1/models`;
+  url.search = '';
+  url.hash = '';
+  return url.toString();
+}
+
+function retryDelayMs(attempt, options) {
+  const base = options.baseUrlRetryDelayMs;
+  return Math.min(base * Math.max(1, attempt), options.baseUrlMaxRetryDelayMs);
+}
+
+function probeErrorMessage(error, timeoutMs) {
+  if (error?.name === 'AbortError') return `probe timeout after ${timeoutMs}ms`;
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function probeBaseUrl(options, attempt) {
+  const startedAt = Date.now();
+  const url = baseUrlProbeUrl(options.baseUrl);
+  try {
+    const headers = {
+      accept: 'application/json,*/*',
+      'user-agent': 'EpidemicMonitorChatGPTRefresh/1.0',
+    };
+    if (options.authKey) headers.authorization = `Bearer ${options.authKey}`;
+    const res = await fetchWithTimeout(url, options.baseUrlProbeTimeoutMs, { headers });
+    try {
+      if (res.body) await res.body.cancel();
+    } catch {
+      // Probe only needs the status code.
+    }
+    return {
+      ready: res.status < 500,
+      attempt,
+      url,
+      status: res.status,
+      durationMs: Date.now() - startedAt,
+    };
+  } catch (error) {
+    return {
+      ready: false,
+      attempt,
+      url,
+      error: probeErrorMessage(error, options.baseUrlProbeTimeoutMs),
+      durationMs: Date.now() - startedAt,
+    };
+  }
+}
+
+async function waitForBaseUrlReady(options, onProbe) {
+  const startedAt = Date.now();
+  const deadline = startedAt + options.baseUrlWaitMs;
+  let attempt = 0;
+  let lastProbe = null;
+  do {
+    attempt += 1;
+    lastProbe = await probeBaseUrl(options, attempt);
+    await onProbe?.(lastProbe);
+    if (lastProbe.ready) {
+      return {
+        ready: true,
+        attempts: attempt,
+        waitedMs: Date.now() - startedAt,
+        lastProbe,
+      };
+    }
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
+    await sleep(Math.min(retryDelayMs(attempt, options), remainingMs));
+  } while (Date.now() < deadline);
+
+  return {
+    ready: false,
+    attempts: attempt,
+    waitedMs: Date.now() - startedAt,
+    lastProbe,
+  };
 }
 
 async function fetchSource([name, url], itemsPerSource) {
@@ -1041,8 +1127,30 @@ function openQueueDb(dbPath) {
       metrics_json TEXT,
       error TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS pipeline_run_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      stage TEXT NOT NULL,
+      status TEXT NOT NULL,
+      message TEXT,
+      meta_json TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pipeline_run_events_run_id
+      ON pipeline_run_events(run_id, created_at);
   `);
+  ensureColumn(db, 'worker_runs', 'current_stage', 'current_stage TEXT');
+  ensureColumn(db, 'worker_runs', 'heartbeat_at', 'heartbeat_at INTEGER');
+  ensureColumn(db, 'worker_runs', 'worker_id', 'worker_id TEXT');
   return db;
+}
+
+function ensureColumn(db, tableName, columnName, ddl) {
+  const exists = db.prepare(`PRAGMA table_info(${tableName})`).all()
+    .some((column) => column.name === columnName);
+  if (!exists) db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${ddl}`);
 }
 
 function mkdirSyncForFile(filePath) {
@@ -1115,6 +1223,49 @@ async function syncD1IfRequested(options) {
   });
 }
 
+async function syncTelemetryIfRequested(options) {
+  if (!options.syncD1 || !options.d1Telemetry) return null;
+  try {
+    return await syncPipelineTelemetryToD1({
+      queueDbPath: options.queueDbPath,
+      database: options.d1Database,
+      remote: options.d1Remote,
+      local: options.d1Local,
+      persistTo: options.d1PersistTo,
+      dryRun: options.d1DryRun,
+      runLimit: 10,
+      eventLimit: 120,
+    });
+  } catch (error) {
+    console.warn('[chatgpt-refresh-worker] telemetry sync failed:', error instanceof Error ? error.message : String(error));
+    return null;
+  }
+}
+
+function eventMetaJson(meta) {
+  if (!meta) return null;
+  try {
+    return JSON.stringify(meta).slice(0, 8000);
+  } catch {
+    return null;
+  }
+}
+
+function recordRunEvent(db, runId, stage, status, message = '', meta = null) {
+  const now = Date.now();
+  db.prepare(`
+    INSERT INTO pipeline_run_events(run_id, created_at, stage, status, message, meta_json)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(runId, now, stage, status, String(message ?? '').slice(0, 500), eventMetaJson(meta));
+  db.prepare('UPDATE worker_runs SET current_stage = ?, heartbeat_at = ? WHERE id = ?')
+    .run(stage, now, runId);
+}
+
+async function markRunStage(db, runId, options, stage, status, message = '', meta = null, publishTelemetry = false) {
+  recordRunEvent(db, runId, stage, status, message, meta);
+  if (publishTelemetry) await syncTelemetryIfRequested(options);
+}
+
 function enqueueJob(db, type, articleId, priority = 0) {
   const now = Date.now();
   const existing = db.prepare('SELECT id, status FROM jobs WHERE type = ? AND article_id = ?').get(type, articleId);
@@ -1170,7 +1321,7 @@ function claimJobs(db, type, limit, workerId, lockTtlMs) {
     FROM jobs j
     JOIN articles a ON a.id = j.article_id
     WHERE j.type = ? AND j.status = 'PENDING' AND j.available_at <= ?
-    ORDER BY j.priority DESC, j.created_at ASC
+    ORDER BY j.priority DESC, COALESCE(a.published_at, a.last_seen_at, j.created_at) DESC, j.created_at DESC
     LIMIT ?
   `).all(type, now, limit);
   const update = db.prepare(`
@@ -1518,6 +1669,13 @@ async function processVerifyQueue(db, runner, options, workerId) {
   return { claimed: rows.length, published, rejected, metrics };
 }
 
+function loadQueueStats(db) {
+  return db.prepare(`
+    SELECT type, status, COUNT(*) AS count
+    FROM jobs GROUP BY type, status
+  `).all();
+}
+
 function rebuildEventsAndSnapshot(db, options, scanMetrics, classifyMetrics, extractMetrics, verifyMetrics, startedAt) {
   const rows = db.prepare(`
     SELECT id, outbreak_json FROM articles
@@ -1565,10 +1723,7 @@ function rebuildEventsAndSnapshot(db, options, scanMetrics, classifyMetrics, ext
     summary: row.description,
   }));
   const sourceNames = db.prepare('SELECT name FROM sources WHERE last_ok_at IS NOT NULL').all().map((row) => row.name);
-  const queueStats = db.prepare(`
-    SELECT type, status, COUNT(*) AS count
-    FROM jobs GROUP BY type, status
-  `).all();
+  const queueStats = loadQueueStats(db);
   const queueStillProcessing = queueStats.some((row) => ['PENDING', 'RUNNING'].includes(row.status) && Number(row.count) > 0);
   const previousSnapshot = merged.length === 0 && queueStillProcessing
     ? readJsonSync(options.snapshotPath, null)
@@ -1611,12 +1766,79 @@ function rebuildEventsAndSnapshot(db, options, scanMetrics, classifyMetrics, ext
   return snapshot;
 }
 
+async function deferAiUntilBaseUrlReturns(db, runId, options, scan, baseUrl, startedAt) {
+  const classify = {
+    claimed: 0,
+    processed: 0,
+    positives: 0,
+    metrics: [],
+    deferred: 'base-url-unavailable',
+  };
+  const extract = {
+    claimed: 0,
+    published: 0,
+    rejected: 0,
+    metrics: [],
+    deferred: 'base-url-unavailable',
+  };
+  const verify = {
+    claimed: 0,
+    published: 0,
+    rejected: 0,
+    metrics: [],
+    deferred: 'base-url-unavailable',
+  };
+
+  recordRunEvent(db, runId, 'base-url', 'waiting', 'BASE URL unavailable; AI jobs deferred until reconnect', baseUrl);
+  await markRunStage(db, runId, options, 'snapshot', 'running', 'snapshot rebuild started', null, false);
+  const snapshot = rebuildEventsAndSnapshot(db, options, scan, classify, extract, verify, startedAt);
+  snapshot.diagnostics.baseUrl = baseUrl;
+  snapshot.diagnostics.aiDeferred = true;
+  await saveJsonAtomic(options.snapshotPath, snapshot);
+  await markRunStage(db, runId, options, 'snapshot', 'succeeded', 'snapshot written while AI queue waits for BASE URL', {
+    events: snapshot.diagnostics.eventCount,
+    publishedOutbreaks: snapshot.diagnostics.publishedOutbreakCount,
+    articleCount: snapshot.diagnostics.articleCount,
+  }, false);
+
+  const now = Date.now();
+  db.prepare('UPDATE worker_runs SET completed_at = ?, metrics_json = ?, current_stage = ?, heartbeat_at = ? WHERE id = ?')
+    .run(now, JSON.stringify(snapshot.diagnostics), 'base-url-wait', now, runId);
+  await syncTelemetryIfRequested(options);
+
+  console.log(JSON.stringify({
+    ok: true,
+    mode: 'queue',
+    deferred: 'base-url-unavailable',
+    snapshotPath: options.snapshotPath,
+    queueDbPath: options.queueDbPath,
+    articles: snapshot.diagnostics.articleCount,
+    events: snapshot.diagnostics.eventCount,
+    scanNew: scan.newArticles ?? 0,
+    scanChanged: scan.changedArticles ?? 0,
+    baseUrl,
+    pipelineMs: snapshot.diagnostics.pipelineMs,
+  }, null, 2));
+
+  return snapshot;
+}
+
 async function runQueueCycle(options) {
   const db = openQueueDb(options.queueDbPath);
   const runners = { classify: [], extract: null, verify: null };
   const startedAt = Date.now();
-  const run = db.prepare('INSERT INTO worker_runs(started_at, mode) VALUES (?, ?)').run(startedAt, 'queue');
+  const workerId = `worker-${process.pid}`;
+  const run = db.prepare(`
+    INSERT INTO worker_runs(started_at, mode, worker_id, current_stage, heartbeat_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(startedAt, 'queue', workerId, 'starting', startedAt);
+  const runId = Number(run.lastInsertRowid);
   try {
+    await markRunStage(db, runId, options, 'starting', 'running', 'worker cycle started', {
+      queueDbPath: options.queueDbPath,
+      snapshotPath: options.snapshotPath,
+      syncD1: options.syncD1,
+    }, true);
     await mkdir(options.stateRoot, { recursive: true });
     const keys = options.authKeys.length > 0 ? options.authKeys : [options.authKey];
     for (let index = 0; index < options.classifyConcurrency; index += 1) {
@@ -1647,17 +1869,80 @@ async function runQueueCycle(options) {
       stateRoot: options.stateRoot,
     });
 
+    await markRunStage(db, runId, options, 'scan', 'running', options.skipScan ? 'RSS scan skipped' : 'RSS scan started', null, true);
     const scan = options.skipScan ? { skipped: true } : await scanSourcesToQueue(db, options);
-    const classify = await processClassifyQueue(db, runners, options, `worker-${process.pid}`);
-    const extract = await processExtractQueue(db, runners.extract, options, `worker-${process.pid}`);
+    await markRunStage(db, runId, options, 'scan', 'succeeded', 'RSS scan finished', {
+      newArticles: scan.newArticles ?? 0,
+      changedArticles: scan.changedArticles ?? 0,
+      seenArticles: scan.seenArticles ?? 0,
+      durationMs: scan.durationMs,
+    }, true);
+
+    await markRunStage(db, runId, options, 'base-url', 'running', 'checking ChatGPT2API BASE URL', {
+      baseUrl: options.baseUrl,
+      waitMs: options.baseUrlWaitMs,
+    }, true);
+    const baseUrl = await waitForBaseUrlReady(options, (probe) => {
+      if (probe.ready) return;
+      recordRunEvent(db, runId, 'base-url', 'waiting', 'BASE URL unavailable; retrying', probe);
+    });
+    if (!baseUrl.ready) {
+      return await deferAiUntilBaseUrlReturns(db, runId, options, scan, baseUrl, startedAt);
+    }
+    await markRunStage(db, runId, options, 'base-url', 'succeeded', 'ChatGPT2API BASE URL reachable', baseUrl, true);
+
+    await markRunStage(db, runId, options, 'classify', 'running', 'classification queue started', null, true);
+    const classify = await processClassifyQueue(db, runners, options, workerId);
+    await markRunStage(db, runId, options, 'classify', 'succeeded', 'classification queue finished', {
+      claimed: classify.claimed,
+      processed: classify.processed,
+      positives: classify.positives,
+      errors: classify.metrics.filter((metric) => !metric.ok).length,
+    }, true);
+
+    await markRunStage(db, runId, options, 'extract', 'running', 'extraction queue started', null, true);
+    const extract = await processExtractQueue(db, runners.extract, options, workerId);
+    await markRunStage(db, runId, options, 'extract', 'succeeded', 'extraction queue finished', {
+      claimed: extract.claimed,
+      published: extract.published,
+      rejected: extract.rejected,
+      errors: extract.metrics.filter((metric) => !metric.ok).length,
+    }, true);
+
+    await markRunStage(db, runId, options, 'verify', 'running', options.verifyJobLimit > 0 ? 'verification queue started' : 'verification disabled', null, true);
     const verify = options.verifyJobLimit > 0
-      ? await processVerifyQueue(db, runners.verify, options, `worker-${process.pid}`)
+      ? await processVerifyQueue(db, runners.verify, options, workerId)
       : { claimed: 0, published: 0, rejected: 0, metrics: [] };
+    await markRunStage(db, runId, options, 'verify', 'succeeded', 'verification queue finished', {
+      claimed: verify.claimed,
+      published: verify.published,
+      rejected: verify.rejected,
+      errors: verify.metrics.filter((metric) => !metric.ok).length,
+    }, true);
+
+    await markRunStage(db, runId, options, 'snapshot', 'running', 'snapshot rebuild started', null, true);
     const snapshot = rebuildEventsAndSnapshot(db, options, scan, classify, extract, verify, startedAt);
     await saveJsonAtomic(options.snapshotPath, snapshot);
+    await markRunStage(db, runId, options, 'snapshot', 'succeeded', 'snapshot written', {
+      events: snapshot.diagnostics.eventCount,
+      publishedOutbreaks: snapshot.diagnostics.publishedOutbreakCount,
+      articleCount: snapshot.diagnostics.articleCount,
+    }, true);
+
+    await markRunStage(db, runId, options, 'd1-sync', 'running', options.syncD1 ? 'D1 sync started' : 'D1 sync disabled', null, true);
     const d1Sync = await syncD1IfRequested(options);
+    await markRunStage(db, runId, options, 'd1-sync', 'succeeded', options.syncD1 ? 'D1 sync finished' : 'D1 sync skipped', {
+      itemCount: d1Sync?.itemCount ?? 0,
+      publishedCount: d1Sync?.publishedCount ?? 0,
+      newsOnlyCount: d1Sync?.newsOnlyCount ?? 0,
+      telemetryRunCount: d1Sync?.telemetryRunCount ?? 0,
+      telemetryEventCount: d1Sync?.telemetryEventCount ?? 0,
+    }, false);
     db.prepare('UPDATE worker_runs SET completed_at = ?, metrics_json = ? WHERE id = ?')
-      .run(Date.now(), JSON.stringify({ ...snapshot.diagnostics, d1Sync }), run.lastInsertRowid);
+      .run(Date.now(), JSON.stringify({ ...snapshot.diagnostics, d1Sync }), runId);
+    await markRunStage(db, runId, options, 'completed', 'succeeded', 'worker cycle completed', {
+      pipelineMs: snapshot.diagnostics.pipelineMs,
+    }, true);
     console.log(JSON.stringify({
       ok: true,
       mode: 'queue',
@@ -1677,8 +1962,11 @@ async function runQueueCycle(options) {
     }, null, 2));
     return snapshot;
   } catch (error) {
-    db.prepare('UPDATE worker_runs SET completed_at = ?, error = ? WHERE id = ?')
-      .run(Date.now(), error instanceof Error ? error.message : String(error), run.lastInsertRowid);
+    const message = error instanceof Error ? error.message : String(error);
+    recordRunEvent(db, runId, 'failed', 'failed', message);
+    db.prepare('UPDATE worker_runs SET completed_at = ?, error = ?, current_stage = ?, heartbeat_at = ? WHERE id = ?')
+      .run(Date.now(), message, 'failed', Date.now(), runId);
+    await syncTelemetryIfRequested(options);
     throw error;
   } finally {
     for (const runner of runners.classify) runner.close();
@@ -1824,9 +2112,14 @@ function buildOptions(args) {
     d1Local: flag(args['d1-local']) || flag(args.local) || flag(process.env.CHATGPT_D1_LOCAL),
     d1PersistTo: args['d1-persist-to'] || args['persist-to'] || process.env.CHATGPT_D1_PERSIST_TO,
     d1DryRun: flag(args['d1-dry-run']) || flag(args['dry-run']) || flag(process.env.CHATGPT_D1_DRY_RUN),
+    d1Telemetry: !flag(args['no-d1-telemetry']) && !flag(process.env.CHATGPT_D1_TELEMETRY_DISABLED),
     d1SyncLimit: positiveInt(args['d1-sync-limit'] ?? process.env.CHATGPT_D1_SYNC_LIMIT, 1000),
     classifyTimeoutMs: positiveInt(args['classify-timeout-ms'] ?? process.env.CHATGPT2API_CLASSIFY_TIMEOUT_MS, 110_000),
     extractTimeoutMs: positiveInt(args['extract-timeout-ms'] ?? process.env.CHATGPT2API_EXTRACT_TIMEOUT_MS, 65_000),
+    baseUrlWaitMs: nonNegativeInt(args['base-url-wait-ms'] ?? process.env.CHATGPT2API_BASE_URL_WAIT_MS, 5 * 60_000),
+    baseUrlProbeTimeoutMs: positiveInt(args['base-url-probe-timeout-ms'] ?? process.env.CHATGPT2API_BASE_URL_PROBE_TIMEOUT_MS, 7_000),
+    baseUrlRetryDelayMs: positiveInt(args['base-url-retry-delay-ms'] ?? process.env.CHATGPT2API_BASE_URL_RETRY_DELAY_MS, 15_000),
+    baseUrlMaxRetryDelayMs: positiveInt(args['base-url-max-retry-delay-ms'] ?? process.env.CHATGPT2API_BASE_URL_MAX_RETRY_DELAY_MS, 60_000),
     intervalMs: positiveInt(args['interval-ms'] ?? process.env.OUTBREAK_REFRESH_INTERVAL_MS, 10 * 60_000),
     hardTimeoutMs,
     jobLockTtlMs: positiveInt(args['job-lock-ttl-ms'] ?? process.env.CHATGPT_REFRESH_JOB_LOCK_TTL_MS, hardTimeoutMs),

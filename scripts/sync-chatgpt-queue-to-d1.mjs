@@ -8,6 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 const DEFAULT_QUEUE_DB_PATH = '.chatgpt-refresh/queue.db';
 const DEFAULT_SNAPSHOT_PATH = '.chatgpt-refresh/latest-snapshot.json';
 const DEFAULT_SQL_PATH = '.chatgpt-refresh/d1-sync.sql';
+const DEFAULT_TELEMETRY_SQL_PATH = '.chatgpt-refresh/d1-telemetry-sync.sql';
 const DEFAULT_DATABASE = 'epidemic-monitor';
 const DEFAULT_LIMIT = 1000;
 
@@ -46,6 +47,53 @@ CREATE INDEX IF NOT EXISTS idx_outbreak_items_hotspot
 CREATE UNIQUE INDEX IF NOT EXISTS idx_outbreak_items_article_key
   ON outbreak_items(article_key)
   WHERE article_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS pipeline_runs (
+  run_id TEXT PRIMARY KEY,
+  mode TEXT NOT NULL DEFAULT 'queue',
+  status TEXT NOT NULL DEFAULT 'running',
+  current_stage TEXT,
+  worker_id TEXT,
+  started_at INTEGER NOT NULL,
+  heartbeat_at INTEGER,
+  completed_at INTEGER,
+  duration_ms INTEGER,
+  article_count INTEGER NOT NULL DEFAULT 0,
+  event_count INTEGER NOT NULL DEFAULT 0,
+  scan_new INTEGER NOT NULL DEFAULT 0,
+  scan_changed INTEGER NOT NULL DEFAULT 0,
+  classified INTEGER NOT NULL DEFAULT 0,
+  positives INTEGER NOT NULL DEFAULT 0,
+  extracted INTEGER NOT NULL DEFAULT 0,
+  verified INTEGER NOT NULL DEFAULT 0,
+  pending_jobs INTEGER NOT NULL DEFAULT 0,
+  running_jobs INTEGER NOT NULL DEFAULT 0,
+  done_jobs INTEGER NOT NULL DEFAULT 0,
+  dead_jobs INTEGER NOT NULL DEFAULT 0,
+  d1_item_count INTEGER NOT NULL DEFAULT 0,
+  d1_published_count INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_runs_started_at
+  ON pipeline_runs(started_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_runs_status
+  ON pipeline_runs(status, heartbeat_at DESC);
+
+CREATE TABLE IF NOT EXISTS pipeline_run_events (
+  event_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  stage TEXT NOT NULL,
+  status TEXT NOT NULL,
+  message TEXT,
+  meta_json TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_run_events_run_id
+  ON pipeline_run_events(run_id, created_at);
 `;
 
 function parseArgs(argv) {
@@ -231,34 +279,147 @@ function loadItemsFromSnapshot(snapshotPath, limit) {
   return outbreaks.slice(0, limit).map(snapshotOutbreakToD1Item).filter((item) => item.title && item.url);
 }
 
-function buildUpsertSql(items) {
-  const rows = items.map((item) => `(
-    ${sqlText(item.id)},
-    ${sqlText(item.title)},
-    ${sqlText(item.summary)},
-    ${sqlText(item.url)},
-    ${sqlText(item.source)},
-    ${sqlText(item.sourceType)},
-    ${sqlText(item.country)},
-    ${sqlText(item.province)},
-    ${sqlText(item.district)},
-    ${sqlText(item.disease)},
-    ${sqlText(item.alertLevel)},
-    ${sqlInteger(item.cases)},
-    ${sqlInteger(item.publishedAt)},
-    ${sqlInteger(item.ingestedAt)}
-  )`).join(',\n');
+function safeJson(value, limit = 8000) {
+  try {
+    return JSON.stringify(value ?? null).slice(0, limit);
+  } catch {
+    return null;
+  }
+}
 
-  if (!rows) return `${SCHEMA_SQL}\n`;
+function tableExists(db, tableName) {
+  try {
+    const row = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(tableName);
+    return Boolean(row);
+  } catch {
+    return false;
+  }
+}
 
-  return `${SCHEMA_SQL}
-INSERT INTO outbreak_items (
-  id, title, summary, url, source, source_type, country, province, district,
-  disease, alert_level, cases, published_at, ingested_at
-)
-VALUES
-${rows}
-ON CONFLICT(id) DO UPDATE SET
+function tableColumns(db, tableName) {
+  try {
+    return new Set(db.prepare(`PRAGMA table_info(${tableName})`).all().map((row) => String(row.name)));
+  } catch {
+    return new Set();
+  }
+}
+
+function jobCounts(db) {
+  const counts = { pending: 0, running: 0, done: 0, dead: 0 };
+  if (!tableExists(db, 'jobs')) return counts;
+  for (const row of db.prepare('SELECT status, COUNT(*) AS count FROM jobs GROUP BY status').all()) {
+    const status = String(row.status ?? '').toUpperCase();
+    const count = Number(row.count ?? 0);
+    if (status === 'PENDING') counts.pending += count;
+    else if (status === 'RUNNING') counts.running += count;
+    else if (status === 'DONE') counts.done += count;
+    else if (status === 'DEAD_LETTER') counts.dead += count;
+  }
+  return counts;
+}
+
+function parseMetricsJson(value) {
+  if (!value) return {};
+  try {
+    return JSON.parse(value);
+  } catch {
+    return {};
+  }
+}
+
+function loadPipelineTelemetry(queueDbPath, { runLimit = 30, eventLimit = 200 } = {}) {
+  if (!existsSync(queueDbPath)) return { runs: [], events: [] };
+  const db = new DatabaseSync(queueDbPath, { readOnly: true });
+  try {
+    if (!tableExists(db, 'worker_runs')) return { runs: [], events: [] };
+    const counts = jobCounts(db);
+    const eventCounts = tableExists(db, 'pipeline_run_events')
+      ? new Map(db.prepare('SELECT run_id, COUNT(*) AS count FROM pipeline_run_events GROUP BY run_id').all()
+        .map((row) => [String(row.run_id), Number(row.count ?? 0)]))
+      : new Map();
+    const articleCount = tableExists(db, 'articles')
+      ? Number(db.prepare('SELECT COUNT(*) AS count FROM articles').get().count ?? 0)
+      : 0;
+
+    const workerRunColumns = tableColumns(db, 'worker_runs');
+    const currentStageSelect = workerRunColumns.has('current_stage') ? 'current_stage' : 'NULL AS current_stage';
+    const heartbeatAtSelect = workerRunColumns.has('heartbeat_at') ? 'heartbeat_at' : 'NULL AS heartbeat_at';
+    const workerIdSelect = workerRunColumns.has('worker_id') ? 'worker_id' : 'NULL AS worker_id';
+    const runRows = db.prepare(`
+      SELECT id, started_at, completed_at, mode, metrics_json, error,
+        ${currentStageSelect}, ${heartbeatAtSelect}, ${workerIdSelect}
+      FROM worker_runs
+      ORDER BY id DESC
+      LIMIT ?
+    `).all(runLimit);
+
+    const runs = runRows.map((row) => {
+      const metrics = parseMetricsJson(row.metrics_json);
+      const d1Sync = metrics.d1Sync ?? {};
+      const completedAt = Number(row.completed_at ?? 0) || undefined;
+      const startedAt = Number(row.started_at ?? 0) || Date.now();
+      return {
+        runId: `queue-${row.id}`,
+        mode: String(row.mode ?? 'queue'),
+        status: row.error ? 'failed' : completedAt ? 'succeeded' : 'running',
+        currentStage: String(row.current_stage ?? (row.error ? 'failed' : completedAt ? 'idle' : 'running')),
+        workerId: row.worker_id ? String(row.worker_id) : undefined,
+        startedAt,
+        heartbeatAt: Number(row.heartbeat_at ?? completedAt ?? startedAt) || startedAt,
+        completedAt,
+        durationMs: completedAt ? completedAt - startedAt : undefined,
+        articleCount: Number(metrics.articleCount ?? articleCount),
+        eventCount: Number(eventCounts.get(String(row.id)) ?? 0),
+        scanNew: Number(metrics.sourceScan?.newArticles ?? 0),
+        scanChanged: Number(metrics.sourceScan?.changedArticles ?? 0),
+        classified: Number(metrics.classify?.processed ?? 0),
+        positives: Number(metrics.classify?.positives ?? 0),
+        extracted: Number(metrics.extract?.claimed ?? 0),
+        verified: Number(metrics.verify?.claimed ?? 0),
+        pendingJobs: counts.pending,
+        runningJobs: counts.running,
+        doneJobs: counts.done,
+        deadJobs: counts.dead,
+        d1ItemCount: Number(d1Sync.itemCount ?? 0),
+        d1PublishedCount: Number(d1Sync.publishedCount ?? 0),
+        error: row.error ? String(row.error).slice(0, 1000) : undefined,
+        updatedAt: Number(row.heartbeat_at ?? completedAt ?? startedAt) || Date.now(),
+      };
+    });
+
+    const eventRows = tableExists(db, 'pipeline_run_events')
+      ? db.prepare(`
+          SELECT id, run_id, created_at, stage, status, message, meta_json
+          FROM pipeline_run_events
+          ORDER BY id DESC
+          LIMIT ?
+        `).all(eventLimit)
+      : [];
+    const events = eventRows.map((row) => ({
+      eventId: `queue-${row.run_id}-${row.id}`,
+      runId: `queue-${row.run_id}`,
+      createdAt: Number(row.created_at ?? Date.now()),
+      stage: String(row.stage ?? 'unknown'),
+      status: String(row.status ?? 'info'),
+      message: row.message ? String(row.message).slice(0, 500) : undefined,
+      metaJson: row.meta_json ? String(row.meta_json).slice(0, 8000) : undefined,
+    })).reverse();
+
+    return { runs, events };
+  } finally {
+    db.close();
+  }
+}
+
+const UPSERT_COLUMNS = `(
+  id, article_key, content_key, title, summary, url, source, source_type,
+  country, province, district, disease, alert_level, cases, deaths,
+  published_at, ingested_at, confidence, status, raw_json
+)`;
+
+const UPSERT_UPDATE = `ON CONFLICT(id) DO UPDATE SET
+  article_key = excluded.article_key,
+  content_key = excluded.content_key,
   title = excluded.title,
   summary = excluded.summary,
   url = excluded.url,
@@ -270,9 +431,152 @@ ON CONFLICT(id) DO UPDATE SET
   disease = excluded.disease,
   alert_level = excluded.alert_level,
   cases = excluded.cases,
+  deaths = excluded.deaths,
   published_at = excluded.published_at,
-  ingested_at = excluded.ingested_at;
-`;
+  ingested_at = excluded.ingested_at,
+  confidence = excluded.confidence,
+  status = excluded.status,
+  raw_json = excluded.raw_json;`;
+
+function upsertRowSql(item) {
+  return `(
+    ${sqlText(item.id)},
+    ${sqlText(item.articleKey)},
+    ${sqlText(item.contentKey)},
+    ${sqlText(item.title)},
+    ${sqlText(item.summary)},
+    ${sqlText(item.url)},
+    ${sqlText(item.source)},
+    ${sqlText(item.sourceType)},
+    ${sqlText(item.country)},
+    ${sqlText(item.province)},
+    ${sqlText(item.district)},
+    ${sqlText(item.disease)},
+    ${sqlText(item.alertLevel)},
+    ${sqlInteger(item.cases)},
+    ${sqlInteger(item.deaths)},
+    ${sqlInteger(item.publishedAt)},
+    ${sqlInteger(item.ingestedAt)},
+    ${sqlNumber(item.confidence)},
+    ${sqlText(item.status)},
+    ${sqlText(item.rawJson)}
+  )`;
+}
+
+function chunkItems(items, size) {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
+function buildUpsertSql(items) {
+  if (!items.length) return `${SCHEMA_SQL}\n`;
+
+  const statements = chunkItems(items, 50).map((batch) => `INSERT INTO outbreak_items ${UPSERT_COLUMNS}
+VALUES
+${batch.map(upsertRowSql).join(',\n')}
+${UPSERT_UPDATE}`);
+
+  return `${SCHEMA_SQL}\n${statements.join('\n\n')}\n`;
+}
+
+function pipelineRunRowSql(run) {
+  return `(
+    ${sqlText(run.runId)},
+    ${sqlText(run.mode)},
+    ${sqlText(run.status)},
+    ${sqlText(run.currentStage)},
+    ${sqlText(run.workerId)},
+    ${sqlInteger(run.startedAt)},
+    ${sqlInteger(run.heartbeatAt)},
+    ${sqlInteger(run.completedAt)},
+    ${sqlInteger(run.durationMs)},
+    ${sqlInteger(run.articleCount)},
+    ${sqlInteger(run.eventCount)},
+    ${sqlInteger(run.scanNew)},
+    ${sqlInteger(run.scanChanged)},
+    ${sqlInteger(run.classified)},
+    ${sqlInteger(run.positives)},
+    ${sqlInteger(run.extracted)},
+    ${sqlInteger(run.verified)},
+    ${sqlInteger(run.pendingJobs)},
+    ${sqlInteger(run.runningJobs)},
+    ${sqlInteger(run.doneJobs)},
+    ${sqlInteger(run.deadJobs)},
+    ${sqlInteger(run.d1ItemCount)},
+    ${sqlInteger(run.d1PublishedCount)},
+    ${sqlText(run.error)},
+    ${sqlInteger(run.updatedAt)}
+  )`;
+}
+
+function pipelineEventRowSql(event) {
+  return `(
+    ${sqlText(event.eventId)},
+    ${sqlText(event.runId)},
+    ${sqlInteger(event.createdAt)},
+    ${sqlText(event.stage)},
+    ${sqlText(event.status)},
+    ${sqlText(event.message)},
+    ${sqlText(event.metaJson)}
+  )`;
+}
+
+function buildPipelineTelemetrySql(telemetry) {
+  const statements = [];
+  if (telemetry.runs.length > 0) {
+    statements.push(...chunkItems(telemetry.runs, 50).map((batch) => `INSERT INTO pipeline_runs (
+  run_id, mode, status, current_stage, worker_id, started_at, heartbeat_at,
+  completed_at, duration_ms, article_count, event_count, scan_new, scan_changed,
+  classified, positives, extracted, verified, pending_jobs, running_jobs,
+  done_jobs, dead_jobs, d1_item_count, d1_published_count, error, updated_at
+)
+VALUES
+${batch.map(pipelineRunRowSql).join(',\n')}
+ON CONFLICT(run_id) DO UPDATE SET
+  mode = excluded.mode,
+  status = excluded.status,
+  current_stage = excluded.current_stage,
+  worker_id = excluded.worker_id,
+  heartbeat_at = excluded.heartbeat_at,
+  completed_at = excluded.completed_at,
+  duration_ms = excluded.duration_ms,
+  article_count = excluded.article_count,
+  event_count = excluded.event_count,
+  scan_new = excluded.scan_new,
+  scan_changed = excluded.scan_changed,
+  classified = excluded.classified,
+  positives = excluded.positives,
+  extracted = excluded.extracted,
+  verified = excluded.verified,
+  pending_jobs = excluded.pending_jobs,
+  running_jobs = excluded.running_jobs,
+  done_jobs = excluded.done_jobs,
+  dead_jobs = excluded.dead_jobs,
+  d1_item_count = excluded.d1_item_count,
+  d1_published_count = excluded.d1_published_count,
+  error = excluded.error,
+  updated_at = excluded.updated_at;`));
+  }
+
+  if (telemetry.events.length > 0) {
+    statements.push(...chunkItems(telemetry.events, 50).map((batch) => `INSERT INTO pipeline_run_events (
+  event_id, run_id, created_at, stage, status, message, meta_json
+)
+VALUES
+${batch.map(pipelineEventRowSql).join(',\n')}
+ON CONFLICT(event_id) DO UPDATE SET
+  run_id = excluded.run_id,
+  created_at = excluded.created_at,
+  stage = excluded.stage,
+  status = excluded.status,
+  message = excluded.message,
+  meta_json = excluded.meta_json;`));
+  }
+
+  return statements.join('\n\n');
 }
 
 function runWranglerD1({ database, sqlPath, remote, local, persistTo }) {
@@ -309,8 +613,13 @@ export async function syncQueueToD1(input = {}) {
 
   const queueItems = loadItemsFromQueue(queueDbPath, limit);
   const items = queueItems.length > 0 ? queueItems : loadItemsFromSnapshot(snapshotPath, limit);
+  const telemetry = loadPipelineTelemetry(queueDbPath, {
+    runLimit: input.runLimit ?? 30,
+    eventLimit: input.eventLimit ?? 200,
+  });
   mkdirForFile(sqlPath);
-  await writeFile(sqlPath, buildUpsertSql(items), 'utf8');
+  const telemetrySql = buildPipelineTelemetrySql(telemetry);
+  await writeFile(sqlPath, `${buildUpsertSql(items)}${telemetrySql ? `\n${telemetrySql}\n` : ''}`, 'utf8');
 
   const summary = {
     ok: true,
@@ -322,6 +631,46 @@ export async function syncQueueToD1(input = {}) {
     itemCount: items.length,
     publishedCount: items.filter((item) => item.status === 'PUBLISHED').length,
     newsOnlyCount: items.filter((item) => item.status !== 'PUBLISHED').length,
+    telemetryRunCount: telemetry.runs.length,
+    telemetryEventCount: telemetry.events.length,
+  };
+
+  if (!dryRun) {
+    const wrangler = runWranglerD1({ database, sqlPath, remote, local, persistTo });
+    summary.wrangler = {
+      stdout: wrangler.stdout.trim().slice(-1000),
+      stderr: wrangler.stderr.trim().slice(-1000),
+    };
+  }
+
+  return summary;
+}
+
+export async function syncPipelineTelemetryToD1(input = {}) {
+  loadEnvLocal();
+  const queueDbPath = resolve(process.cwd(), input.queueDbPath ?? DEFAULT_QUEUE_DB_PATH);
+  const sqlPath = resolve(process.cwd(), input.sqlPath ?? DEFAULT_TELEMETRY_SQL_PATH);
+  const database = String(input.database ?? process.env.CHATGPT_D1_DATABASE ?? DEFAULT_DATABASE);
+  const remote = input.remote === true;
+  const local = input.local === true || (!remote && input.local !== false);
+  const dryRun = input.dryRun === true;
+  const persistTo = input.persistTo ?? process.env.CHATGPT_D1_PERSIST_TO;
+  const telemetry = loadPipelineTelemetry(queueDbPath, {
+    runLimit: input.runLimit ?? 10,
+    eventLimit: input.eventLimit ?? 100,
+  });
+  mkdirForFile(sqlPath);
+  const telemetrySql = buildPipelineTelemetrySql(telemetry);
+  await writeFile(sqlPath, `${SCHEMA_SQL}\n${telemetrySql ? `${telemetrySql}\n` : ''}`, 'utf8');
+
+  const summary = {
+    ok: true,
+    database,
+    target: dryRun ? 'dry-run' : remote ? 'remote' : 'local',
+    sqlPath,
+    queueDbPath,
+    telemetryRunCount: telemetry.runs.length,
+    telemetryEventCount: telemetry.events.length,
   };
 
   if (!dryRun) {
@@ -350,7 +699,7 @@ function buildOptions(args) {
   };
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const options = buildOptions(parseArgs(process.argv.slice(2)));
   syncQueueToD1(options)
     .then((summary) => {
