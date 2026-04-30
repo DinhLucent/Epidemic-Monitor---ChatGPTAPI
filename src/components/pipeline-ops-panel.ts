@@ -113,14 +113,16 @@ function stageSummary(stage: string, run: PipelineRun, event: PipelineEvent | un
   if (stage === 'classify') {
     const claimed = metric(meta, 'claimed');
     const processed = metric(meta, 'processed') ?? run.classified;
+    const aiOutbreaks = metric(meta, 'aiOutbreaks');
     const positives = metric(meta, 'positives') ?? run.positives;
+    const guardrailRejected = metric(meta, 'guardrailRejected');
     return {
       stage,
       status,
       count: `${fmt(processed)} done`,
-      detail: `${fmt(positives)} pos / ${fmt(errors)} err`,
+      detail: `${fmt(positives)} pos / ${fmt(guardrailRejected, '-')} guard / ${fmt(errors)} err`,
       work: `${fmt(claimed, '-')} claimed`,
-      result: `${fmt(processed)} done, ${fmt(positives)} pos`,
+      result: `${fmt(processed)} done, ${fmt(positives)} pos, ${fmt(aiOutbreaks, '-')} AI`,
       errors: fmt(errors),
     };
   }
