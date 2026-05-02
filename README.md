@@ -9,7 +9,6 @@
 </p>
 
 <p align="center">
-  <a href="https://epidemic-monitor.pages.dev">🌐 Live Demo</a> ·
   <a href="#chức-năng-chính">✨ Features</a> ·
   <a href="#stack">🛠 Stack</a> ·
   <a href="#chạy-local">🚀 Quick Start</a>
@@ -212,6 +211,22 @@ docker compose --profile worker up --build # Web + worker
 - Ranh giới bản đồ 34 tỉnh/thành chưa được vẽ (chờ GeoJSON chính thức).
 - Dữ liệu khí hậu/môi trường chỉ là tín hiệu phụ trợ.
 
+## Attribution / Upstream
+
+This project is a modified version of:
+https://github.com/phuc-nt/my-epidemic-monitor
+
+Original author: Phuc Nguyen  
+Original license: AGPL-3.0-only
+
+Modified by: DinhLucent  
+Modification period: April-May 2026  
+Main changes:
+- Added ChatGPT-compatible background worker
+- Added D1 sync / refresh workflow
+- Added Docker and evaluation scripts
+- Updated README, architecture docs, and UI behavior
+
 ## License
 
 [AGPL-3.0-only](LICENSE)
@@ -219,5 +234,6 @@ docker compose --profile worker up --build # Web + worker
 ---
 
 <p align="center">
-  <sub>Built with ☕ by <a href="https://github.com/phuc-nt">Phuc Nguyen</a></sub>
+  <sub>Built with ☕ by <a href="https://github.com/phuc-nt">Phuc Nguyen</a></sub><br>
+  <sub>Modified by <a href="https://github.com/DinhLucent">DinhLucent</a></sub>
 </p>

@@ -9,7 +9,6 @@
 
 // Whitelist of allowed origins for /api/* endpoints
 const ALLOWED_ORIGINS = [
-  'https://epidemic-monitor.pages.dev',
   'http://localhost:5173',  // Vite dev
   'http://localhost:5174',  // Docker/wrangler mapped port
   'http://127.0.0.1:5174',

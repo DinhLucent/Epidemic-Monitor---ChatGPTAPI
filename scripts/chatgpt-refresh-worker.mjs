@@ -597,6 +597,9 @@ export function isPublishablePublicHealthSignal(disease, text, cases) {
   const diseaseText = normalizeText(disease);
   const value = normalizeText(text);
   const n = cases ?? estimateCaseCountFromText(value) ?? 0;
+  const foodborneDisease = /\b(ngo doc thuc pham|food poisoning|salmonella|e coli|ecoli|botulinum|botulism|staphylococcus)\b/.test(diseaseText);
+  const foodborneText = /\b(ngo doc|nghi ngo doc)\b/.test(value)
+    && /\b(thuc pham|banh mi|com|suat an|bep an|an banh|an com|thuc an|salmonella|e coli|ecoli|vi khuan|nhiem khuan)\b/.test(value);
 
   if (/\b(xuat huyet tieu hoa|ung thu|u thu|dot quy|suy than|ha kali|bong|chan thuong|tai nan)\b/.test(diseaseText)) {
     return false;
@@ -606,7 +609,7 @@ export function isPublishablePublicHealthSignal(disease, text, cases) {
     return n >= 5 && /\b(tap the|hang loat|truong hoc|hoc sinh|bep an|cong ty|cong nhan|dieu tra|so y te)\b/.test(value);
   }
 
-  if (/\b(ngo doc thuc pham|food poisoning)\b/.test(diseaseText) || /\bngo doc thuc pham\b/.test(value)) {
+  if (foodborneDisease || foodborneText || /\bngo doc thuc pham\b/.test(value)) {
     return n >= 2 || /\b(tap the|hang loat|truong hoc|hoc sinh|bep an|cong ty|cong nhan|dieu tra|so y te)\b/.test(value);
   }
 
@@ -614,7 +617,7 @@ export function isPublishablePublicHealthSignal(disease, text, cases) {
     return /\b(benh lao|mac lao|nghi mac lao|ca lao|lao phoi|sang loc|phat hien.*nghi mac|nhieu nguoi)\b/.test(value);
   }
 
-  if (/\b(sot xuat huyet|tay chan mieng|viem nao mo cau|bach hau|ho ga|soi|covid|cum|dai|rabies|meningococcal|dengue)\b/.test(diseaseText)) {
+  if (/\b(sot xuat huyet|tay chan mieng|viem (mang )?nao (do )?mo cau|nao mo cau|bach hau|ho ga|soi|covid|cum|dai|rabies|meningococcal|dengue)\b/.test(diseaseText)) {
     return hasOutbreakEventEvidence(value);
   }
 
@@ -693,8 +696,8 @@ function resolveCoords(province) {
 
 export function normalizeAlert(value, confidence = 0.5) {
   const level = normalizeText(value);
-  if (level === 'outbreak' || level === 'critical' || level === 'high' || level === 'alert') return 'alert';
-  if (level === 'warning') return 'warning';
+  if (/\b(outbreak|critical|high|alert|khan cap|nguy kich|cap cuu|cao)\b/.test(level)) return 'alert';
+  if (/\b(warning|medium|moderate|canh bao|trung binh)\b/.test(level)) return 'warning';
   return confidence >= 0.8 ? 'warning' : 'watch';
 }
 
@@ -720,11 +723,38 @@ export function normalizeClassifyRows(data) {
   return [];
 }
 
+function firstNonEmptyString(...values) {
+  const value = values.find((entry) => typeof entry === 'string' && entry.trim().length > 0);
+  return value ? value.trim() : undefined;
+}
+
+function classificationDisease(row) {
+  return firstNonEmptyString(row?.disease_vn, row?.disease, row?.disease_name, row?.pathogen, row?.disease_intl) ?? 'Unknown';
+}
+
+function classificationAlert(row) {
+  return firstNonEmptyString(row?.alert_level, row?.alert, row?.severity, row?.risk_level);
+}
+
+function classificationProvince(row, text) {
+  return cleanProvince(firstNonEmptyString(row?.province, row?.province_vn, row?.location, row?.locality)) ?? inferProvinceFromText(text);
+}
+
+function classificationCountry(row) {
+  return firstNonEmptyString(row?.country, row?.country_vn) ?? 'Vietnam';
+}
+
+function classificationConfidence(row) {
+  const confidence = Number(row?.confidence);
+  return Number.isFinite(confidence) ? confidence : 0.5;
+}
+
 export function acceptedClassifiedOutbreak(row, item) {
   if (row?.classification !== 'OUTBREAK') return null;
   const text = `${item.title} ${item.description}`;
-  const disease = row.disease_vn || 'Unknown';
-  const province = cleanProvince(row.province) || inferProvinceFromText(text);
+  const disease = classificationDisease(row);
+  const province = classificationProvince(row, text);
+  const confidence = classificationConfidence(row);
   if (!province && !/\b(toan quoc|ca nuoc|bo y te|cdc|so y te)\b/.test(normalizeText(text))) return null;
   if (!hasOutbreakEventEvidence(text) || isGeneralAdvice(text)) return null;
   if (isBadDiseaseContext(disease, text)) return null;
@@ -732,10 +762,10 @@ export function acceptedClassifiedOutbreak(row, item) {
   return {
     item,
     disease,
-    alert: normalizeAlert(row.alert_level, row.confidence),
+    alert: normalizeAlert(classificationAlert(row), confidence),
     province,
-    country: row.country || 'Vietnam',
-    confidence: row.confidence,
+    country: classificationCountry(row),
+    confidence,
   };
 }
 
@@ -808,13 +838,17 @@ async function classifyArticles({ items, seen, runners, options }) {
     const positives = [];
     const decisions = [];
     const decidedItems = [];
+    let aiOutbreakCount = 0;
+    let guardrailRejectedCount = 0;
     for (const row of rows) {
       const item = chunk.items[row.index];
       if (!item) continue;
       decisions.push({ item, decision: row });
       decidedItems.push(item);
       const accepted = acceptedClassifiedOutbreak(row, item);
+      if (row?.classification === 'OUTBREAK') aiOutbreakCount += 1;
       if (accepted) positives.push(accepted);
+      else if (row?.classification === 'OUTBREAK') guardrailRejectedCount += 1;
     }
 
     return {
@@ -829,7 +863,9 @@ async function classifyArticles({ items, seen, runners, options }) {
         ok: true,
         durationMs: Date.now() - startedAt,
         returnedCount: rows.length,
+        aiOutbreakCount,
         outbreakCount: positives.length,
+        guardrailRejectedCount,
       },
     };
   });
@@ -877,6 +913,8 @@ async function classifyArticles({ items, seen, runners, options }) {
     processedCount: processed.length,
     processedItems: processed,
     decisions,
+    aiOutbreaks: metrics.reduce((total, metric) => total + (Number(metric.aiOutbreakCount) || 0), 0),
+    guardrailRejected: metrics.reduce((total, metric) => total + (Number(metric.guardrailRejectedCount) || 0), 0),
   };
 }
 
@@ -1429,7 +1467,7 @@ async function scanSourcesToQueue(db, options) {
 
 async function processClassifyQueue(db, runners, options, workerId) {
   const rows = claimJobs(db, 'classify', options.classifyJobLimit, workerId, options.jobLockTtlMs);
-  if (rows.length === 0) return { claimed: 0, processed: 0, positives: 0, metrics: [] };
+  if (rows.length === 0) return { claimed: 0, processed: 0, positives: 0, aiOutbreaks: 0, guardrailRejected: 0, metrics: [] };
   const items = rows.map(asArticleRowItem);
   const seen = {};
   const result = await classifyArticles({ items, seen, runners, options });
@@ -1479,6 +1517,8 @@ async function processClassifyQueue(db, runners, options, workerId) {
     claimed: rows.length,
     processed: processedIds.size,
     positives: positiveByArticleId.size,
+    aiOutbreaks: result.aiOutbreaks,
+    guardrailRejected: result.guardrailRejected,
     metrics: result.metrics,
   };
 }
@@ -1896,7 +1936,9 @@ async function runQueueCycle(options) {
     await markRunStage(db, runId, options, 'classify', 'succeeded', 'classification queue finished', {
       claimed: classify.claimed,
       processed: classify.processed,
+      aiOutbreaks: classify.aiOutbreaks,
       positives: classify.positives,
+      guardrailRejected: classify.guardrailRejected,
       errors: classify.metrics.filter((metric) => !metric.ok).length,
     }, true);
 
@@ -1953,7 +1995,9 @@ async function runQueueCycle(options) {
       scanNew: scan.newArticles ?? 0,
       scanChanged: scan.changedArticles ?? 0,
       classified: classify.processed,
+      aiOutbreaks: classify.aiOutbreaks,
       positives: classify.positives,
+      guardrailRejected: classify.guardrailRejected,
       extracted: extract.claimed,
       verified: verify.claimed,
       classifyErrors: classify.metrics.filter((metric) => !metric.ok).map((metric) => metric.error).slice(0, 3),

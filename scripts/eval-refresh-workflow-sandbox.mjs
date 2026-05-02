@@ -27,6 +27,14 @@ const fixtures = [
     link: 'https://example.test/food-poisoning-hcm',
   },
   {
+    id: 'salmonella-nghean-old-schema',
+    sourceName: 'VnExpress',
+    title: 'Banh mi nhiem khuan Salmonella gay ngo doc 62 nguoi Nghe An',
+    description: 'Co quan chuc nang phat hien vi khuan Salmonella trong banh mi sau vu nhieu nguoi nhap vien vi ngo doc.',
+    pubDate: 'Wed, 29 Apr 2026 19:32:50 +0700',
+    link: 'https://example.test/salmonella-nghean',
+  },
+  {
     id: 'meningococcal-daklak',
     sourceName: 'Thanh Nien',
     title: 'Xuất hiện viêm não mô cầu, Đắk Lắk khẩn trương truy vết người tiếp xúc',
@@ -82,8 +90,10 @@ assert.equal(ranked[0].id, 'food-poisoning-hcm', 'food-poisoning signal should o
 assert(ranked.slice(0, 3).some((item) => item.id === 'meningococcal-daklak'), 'meningococcal signal should be prioritized');
 assert(outbreakSignalScore(fixtures[1]) > outbreakSignalScore(fixtures[0]), 'signal score should separate outbreak candidates from broad news');
 
-assert.equal(inferProvinceFromText(fixtures[1].title), 'TPHCM', 'TP.HCM should be inferred from title');
-assert.equal(inferProvinceFromText(fixtures[2].title), 'Dak Lak', 'Dak Lak should be inferred from title');
+const fixtureById = new Map(fixtures.map((item) => [item.id, item]));
+
+assert.equal(inferProvinceFromText(fixtureById.get('food-poisoning-hcm').title), 'TPHCM', 'TP.HCM should be inferred from title');
+assert.equal(inferProvinceFromText(fixtureById.get('meningococcal-daklak').title), 'Dak Lak', 'Dak Lak should be inferred from title');
 
 const mockRows = new Map([
   ['food-poisoning-hcm', {
@@ -91,6 +101,14 @@ const mockRows = new Map([
     disease_vn: 'ngộ độc thực phẩm',
     alert_level: 'warning',
     province: null,
+    country: 'Vietnam',
+    confidence: 0.95,
+  }],
+  ['salmonella-nghean-old-schema', {
+    classification: 'OUTBREAK',
+    disease: 'ngo doc thuc pham do Salmonella',
+    alert: 'alert',
+    province: 'Nghe An',
     country: 'Vietnam',
     confidence: 0.95,
   }],
@@ -152,8 +170,8 @@ const accepted = fixtures
 
 assert.deepEqual(
   accepted.map((row) => row.item.id).sort(),
-  ['food-poisoning-hcm', 'hfmd-signal', 'meningococcal-daklak'].sort(),
-  'only real Vietnam outbreak candidates should pass final classify gate',
+  ['food-poisoning-hcm', 'hfmd-signal', 'meningococcal-daklak', 'salmonella-nghean-old-schema'].sort(),
+  'only real Vietnam outbreak candidates should pass final classify gate, including old classify field aliases',
 );
 
 assert.equal(
@@ -180,6 +198,16 @@ assert.equal(
   isPublishablePublicHealthSignal('ngộ độc thực phẩm', '46 học sinh nghi ngộ độc sau khi ăn bánh bao miễn phí tại trường học'),
   true,
   'school food-poisoning cluster should remain publishable',
+);
+assert.equal(
+  isPublishablePublicHealthSignal('Salmonella', 'banh mi nhiem khuan Salmonella gay ngo doc 62 nguoi tai Nghe An'),
+  true,
+  'foodborne pathogen names should remain publishable when the article carries case-count evidence',
+);
+assert.equal(
+  isPublishablePublicHealthSignal('viêm màng não do não mô cầu', 'ghi nhận 2 ca mắc trong cùng gia đình, CDC khẩn trương truy vết'),
+  true,
+  'meningococcal disease aliases should remain publishable when event evidence is present',
 );
 
 console.log(JSON.stringify({
