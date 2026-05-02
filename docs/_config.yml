@@ -6,7 +6,7 @@ plugins:
   - jekyll-remote-theme
 
 baseurl: "/my-epidemic-monitor"
-url: "https://phuc-nt.github.io"
+url: "https://DinhLucent.github.io"
 
 logo: "/assets/logo.svg"
 
@@ -20,14 +20,12 @@ search:
 nav_sort: order
 
 aux_links:
-  "Live App":
-    - "https://epidemic-monitor.pages.dev"
   "GitHub":
-    - "https://github.com/phuc-nt/my-epidemic-monitor"
+    - "https://github.com/DinhLucent/my-epidemic-monitor"
 
 aux_links_new_tab: true
 
-footer_content: "Copyright &copy; 2026 phuc-nt &middot; <a href=\"https://github.com/phuc-nt/my-epidemic-monitor\">GitHub</a> &middot; MIT License"
+footer_content: "Copyright &copy; 2026 DinhLucent &middot; <a href=\"https://github.com/DinhLucent/my-epidemic-monitor\">GitHub</a> &middot; MIT License"
 
 back_to_top: true
 heading_anchors: true

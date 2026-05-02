@@ -19,7 +19,6 @@ permalink: /
 AI tổng hợp tin tức y tế / sức khoẻ cộng đồng từ báo chí Việt Nam, mỗi 6 giờ — gom lại thành một bản đồ duy nhất có dẫn nguồn rõ ràng cho từng tin. **Công cụ tham khảo cộng đồng, không thay thế CDC.**
 {: .fs-5 .fw-300 }
 
-[Mở app]({{ "https://epidemic-monitor.pages.dev" }}){: .btn .btn-primary .fs-5 .mb-4 .mb-md-0 .mr-2 }
 [Vì sao có dự án này]({{ site.baseurl }}/why.html){: .btn .fs-5 .mb-4 .mb-md-0 }
 
 ---
